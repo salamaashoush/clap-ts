@@ -1,6 +1,6 @@
 {
   "name": "clap-ts",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A type-safe CLI argument parser for TypeScript, inspired by Rust's clap crate. Full clap-style parsing, validation, help generation, and subcommand support with zero dependencies.",
   "type": "module",
   "main": "dist/index.js",
