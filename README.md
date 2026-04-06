@@ -515,6 +515,62 @@ runMain(rootCommand, {
 });
 ```
 
+### Shell Completions
+
+Add Tab completion for bash, zsh, fish, and powershell with one line:
+
+```ts
+import { defineCommand, runMain, withCompletions } from 'clap-ts';
+
+const root = defineCommand({
+  meta: { name: 'my-cli', version: '1.0.0' },
+  args: { /* ... */ },
+  subCommands: { /* ... */ },
+});
+
+// Auto-adds a `completions` subcommand
+runMain(withCompletions(root));
+```
+
+Users then enable completions in their shell:
+
+```bash
+# bash - add to ~/.bashrc
+eval "$(my-cli completions bash)"
+
+# zsh - add to ~/.zshrc
+eval "$(my-cli completions zsh)"
+
+# fish - save to completions dir
+my-cli completions fish > ~/.config/fish/completions/my-cli.fish
+
+# powershell - add to $PROFILE
+my-cli completions powershell >> $PROFILE
+```
+
+Generated scripts support flags, subcommands, aliases, enum values, and value hints (file/dir completion):
+
+```ts
+const cmd = defineCommand({
+  meta: { name: 'tool' },
+  args: {
+    config: { type: 'string', valueHint: 'filePath' },   // Tab completes files
+    outDir: { type: 'string', valueHint: 'dirPath' },    // Tab completes directories
+    host: { type: 'string', valueHint: 'hostname' },     // Tab completes hostnames
+    env: { type: 'string', valueParser: ['dev', 'prod'] }, // Tab shows dev, prod
+  },
+});
+```
+
+You can also generate scripts manually without the subcommand:
+
+```ts
+import { generateCompletions } from 'clap-ts';
+
+const bashScript = generateCompletions(root, 'bash');
+const zshScript = generateCompletions(root, 'zsh', 'custom-binary-name');
+```
+
 ### runMain
 
 Entry point for CLI applications. Handles argv parsing, subcommand resolution, validation, help/version, and error display.
@@ -733,12 +789,11 @@ bun run bench/parse.bench.ts
 | hidePossibleValues | Yes | Yes |
 | Hidden args/commands | Yes | Yes |
 | Type-safe parsed args | derive macro | generics |
-| Shell completions | Yes | Not yet |
+| Shell completions (bash/zsh/fish/powershell) | Yes | Yes |
 | Man page generation | Yes | Not yet |
 
 ## Roadmap
 
-- Shell completion generation (bash/zsh/fish)
 - Man page generation
 - Markdown help output
 

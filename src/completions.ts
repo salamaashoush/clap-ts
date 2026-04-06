@@ -601,7 +601,7 @@ const VALID_SHELLS: readonly Shell[] = ['bash', 'zsh', 'fish', 'powershell'];
  * eval "$(my-cli completions bash)"
  * ```
  */
-export function withCompletions<T extends CommandDef>(rootCommand: T): T {
+export function withCompletions(rootCommand: CommandDef<any>): CommandDef<any> {
   const completionsCmd: CommandDef = {
     meta: {
       name: 'completions',
