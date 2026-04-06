@@ -282,8 +282,6 @@ export interface RunOptions {
   readonly showHelpOnEmpty?: boolean;
   /** Custom styles for help and error output. */
   readonly styles?: Partial<StylesDef>;
-  /** Enable dynamic shell completions via CLAP_COMPLETE env var (default: false). */
-  readonly enableCompletions?: boolean;
 }
 
 // ---- Parser Result ----
