@@ -744,7 +744,7 @@ bun run bench/parse.bench.ts
 
 ## Requirements
 
-- Node.js >= 18.0.0 or Bun >= 1.0
+- Node.js >= 20.0.0 or Bun >= 1.0
 - TypeScript >= 5.0 (for `const` type parameter inference)
 
 ## License
