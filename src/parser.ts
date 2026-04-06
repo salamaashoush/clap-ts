@@ -383,7 +383,26 @@ function coerceValue(value: string, def: ArgDef, argName: string): string | numb
 // ---- Subcommand Detection ----
 
 /**
- * Scan positionals for a subcommand name or alias.
+ * Build a lookup map from subcommand names and aliases to canonical names.
+ * Used for O(1) subcommand detection.
+ */
+function buildSubcommandMap(
+  subCommands: Record<string, CommandDef>,
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const [name, def] of Object.entries(subCommands)) {
+    map.set(name, name);
+    if (def.meta.aliases) {
+      for (const alias of def.meta.aliases) {
+        map.set(alias, name);
+      }
+    }
+  }
+  return map;
+}
+
+/**
+ * Scan positionals for a subcommand name or alias using O(1) map lookup.
  * Returns the canonical name and the index in the positionals array.
  */
 function detectSubcommand(
@@ -394,15 +413,11 @@ function detectSubcommand(
     return undefined;
   }
 
+  const subMap = buildSubcommandMap(command.subCommands);
   for (let i = 0; i < positionals.length; i++) {
-    const token = positionals[i]!;
-    if (command.subCommands[token]) {
-      return { name: token, index: i };
-    }
-    for (const [name, def] of Object.entries(command.subCommands)) {
-      if (def.meta.aliases?.includes(token)) {
-        return { name, index: i };
-      }
+    const canonical = subMap.get(positionals[i]!);
+    if (canonical) {
+      return { name: canonical, index: i };
     }
   }
   return undefined;
@@ -630,60 +645,48 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
     }
   }
 
-  // Apply valueDelimiter splitting for args that have it
-  for (const [key, def] of Object.entries(argsDef)) {
-    if (!def.valueDelimiter || !explicitlySet.has(key)) {
-      continue;
-    }
-    const value = result[key];
-    if (value !== undefined && (typeof value === 'string' || Array.isArray(value))) {
-      result[key] = splitByDelimiter(value, def.valueDelimiter);
-    }
-  }
+  // Single pass: valueDelimiter splitting, env fallback, conditional defaults, static defaults
+  const argsDefEntries = Object.entries(argsDef);
+  for (let a = 0; a < argsDefEntries.length; a++) {
+    const [key, def] = argsDefEntries[a]!;
 
-  // Apply env var fallbacks for args not explicitly set
-  for (const [key, def] of Object.entries(argsDef)) {
     if (explicitlySet.has(key)) {
-      continue;
-    }
-    if (!def.env) {
-      continue;
-    }
-
-    const envValue =
-      globalThis.Bun === undefined
-        ? process.env[def.env]
-        : (globalThis.Bun as { env: Record<string, string | undefined> }).env[def.env];
-
-    if (envValue !== undefined && envValue !== '') {
+      // Apply valueDelimiter splitting for explicitly set args
       if (def.valueDelimiter) {
-        result[key] = envValue.split(def.valueDelimiter);
-      } else {
-        result[key] = coerceValue(envValue, def, `env:${def.env}`);
+        const value = result[key];
+        if (value !== undefined && (typeof value === 'string' || Array.isArray(value))) {
+          result[key] = splitByDelimiter(value, def.valueDelimiter);
+        }
       }
-      explicitlySet.add(key);
-    }
-  }
-
-  // Apply conditional defaults (defaultValueIf) before static defaults
-  for (const [key, def] of Object.entries(argsDef)) {
-    if (explicitlySet.has(key)) {
       continue;
     }
+
+    // Env var fallback
+    if (def.env) {
+      const envValue =
+        globalThis.Bun === undefined
+          ? process.env[def.env]
+          : (globalThis.Bun as { env: Record<string, string | undefined> }).env[def.env];
+
+      if (envValue !== undefined && envValue !== '') {
+        result[key] = def.valueDelimiter
+          ? envValue.split(def.valueDelimiter)
+          : coerceValue(envValue, def, `env:${def.env}`);
+        explicitlySet.add(key);
+        continue;
+      }
+    }
+
+    // Conditional default (defaultValueIf)
     if (def.defaultValueIf) {
       const [otherKey, otherValue, conditionalDefault] = def.defaultValueIf;
       if (String(result[otherKey]) === String(otherValue)) {
         result[key] = conditionalDefault;
-        continue; // skip static default
+        continue;
       }
     }
-  }
 
-  // Apply static defaults for args not explicitly set and not from env
-  for (const [key, def] of Object.entries(argsDef)) {
-    if (explicitlySet.has(key) || result[key] !== undefined) {
-      continue;
-    }
+    // Static default
     if (def.default !== undefined) {
       if (Array.isArray(def.default)) {
         result[key] = [...def.default];
