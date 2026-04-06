@@ -10,6 +10,8 @@ export type {
   ArgAction,
   NumArgs,
   ValueParserFn,
+  ValueHint,
+  Shell,
   ArgDef,
   ArgsDef,
   StyleFn,
@@ -42,3 +44,6 @@ export { renderHelp, renderUsage, showHelp, showVersion, showError } from './hel
 
 // Runner (main API)
 export { defineCommand, defineArgs, defineArg, runCommand, runMain } from './runner.js';
+
+// Shell completions
+export { generateCompletions, completeEnv } from './completions.js';

@@ -20,6 +20,21 @@ export interface NumArgs {
 /** Custom value parser function. Receives raw string, returns parsed value or throws. */
 export type ValueParserFn = (value: string) => unknown;
 
+/** Hint for shell completion behavior -- guides what kind of values to complete. */
+export type ValueHint =
+  | 'filePath'
+  | 'dirPath'
+  | 'anyPath'
+  | 'executablePath'
+  | 'commandName'
+  | 'hostname'
+  | 'username'
+  | 'url'
+  | 'emailAddress';
+
+/** Supported shells for completion script generation. */
+export type Shell = 'bash' | 'zsh' | 'fish' | 'powershell';
+
 /** Full argument definition - matches clap::Arg. */
 export interface ArgDef {
   /** Value type for this argument. */
@@ -99,6 +114,8 @@ export interface ArgDef {
   readonly last?: boolean;
   /** Custom section heading in help output (groups args under this heading). */
   readonly helpHeading?: string;
+  /** Hint for shell completion -- guides what kind of values to suggest (files, dirs, hosts, etc.). */
+  readonly valueHint?: ValueHint;
 }
 
 /** Record of argument name to definition. */
@@ -265,6 +282,8 @@ export interface RunOptions {
   readonly showHelpOnEmpty?: boolean;
   /** Custom styles for help and error output. */
   readonly styles?: Partial<StylesDef>;
+  /** Enable dynamic shell completions via CLAP_COMPLETE env var (default: false). */
+  readonly enableCompletions?: boolean;
 }
 
 // ---- Parser Result ----

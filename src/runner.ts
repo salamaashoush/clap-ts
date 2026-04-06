@@ -23,6 +23,7 @@ import {
 } from './parser.js';
 import { validate } from './validation.js';
 import { showError, showHelp, showVersion } from './help.js';
+import { completeEnv } from './completions.js';
 
 // ---- defineCommand ----
 
@@ -355,6 +356,14 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
   const shouldExit = opts?.exit !== false;
   const showHelpOnEmpty = opts?.showHelpOnEmpty !== false;
   const styles = opts?.styles;
+
+  // Dynamic shell completions: check env var before any parsing
+  if (opts?.enableCompletions && completeEnv(rootCommand)) {
+    if (shouldExit) {
+      process.exit(0);
+    }
+    return;
+  }
 
   try {
     const rawArgs = getRawArgs(opts?.argv);
