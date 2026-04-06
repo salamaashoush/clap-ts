@@ -462,10 +462,11 @@ Typical parsing times (measured with `bun bench`):
 
 | Scenario | Time |
 |----------|------|
-| Minimal (no args) | ~3us |
-| Simple (5 flags) | ~8us |
-| Complex (22 flags) | ~20us |
-| Full pipeline (parse + validate) | ~25us |
+| Minimal (no args) | ~1.8us |
+| Simple (5 flags) | ~12us |
+| Complex (22 flags) | ~18us |
+| Subcommand detection | ~13us |
+| Full pipeline (parse + validate) | ~31us |
 
 To run benchmarks yourself:
 
@@ -503,7 +504,30 @@ clap-ts implements the core feature set of Rust's clap:
 | Colored help output | Yes | Yes |
 | Hidden args/commands | Yes | Yes |
 | Type-safe parsed args | derive macro | generics |
-| Custom value parsers | Yes | Not yet |
+| Custom value parsers | Yes | Yes |
+| exclusive arg | Yes | Yes |
+| requiredUnlessPresent | Yes | Yes |
+| requiredIfEq | Yes | Yes |
+| defaultValueIf | Yes | Yes |
+| allowHyphenValues | Yes | Yes |
+| allowNegativeNumbers | Yes | Yes |
+| valueDelimiter | Yes | Yes |
+| trailingVarArg | Yes | Yes |
+| last (positional after --) | Yes | Yes |
+| inferSubcommands | Yes | Yes |
+| inferLongArgs | Yes | Yes |
+| subcommandRequired | Yes | Yes |
+| subcommandNegatesReqs | Yes | Yes |
+| allowExternalSubcommands | Yes | Yes |
+| argsConflictsWithSubcommands | Yes | Yes |
+| argRequiredElseHelp | Yes | Yes |
+| beforeHelp | Yes | Yes |
+| helpHeading (grouping) | Yes | Yes |
+| helpTemplate | Yes | Yes |
+| hideShortHelp / hideLongHelp | Yes | Yes |
+| hidePossibleValues | Yes | Yes |
+| visibleAlias | Yes | Yes |
+| Custom styles | Yes | Yes |
 | Shell completions | Yes | Not yet |
 | Man page generation | Yes | Not yet |
 
@@ -511,13 +535,9 @@ clap-ts implements the core feature set of Rust's clap:
 
 Features planned for future releases:
 
-- Custom value parsers (beyond enum validation)
 - Shell completion generation (bash/zsh/fish)
 - Man page generation
 - Markdown help output
-- Custom error formatters
-- Color theme customization
-- Range validators for numeric args
 
 ## Requirements
 

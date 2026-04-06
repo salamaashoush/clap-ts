@@ -1,6 +1,7 @@
 /**
  * Argument validation - enforces constraints after parsing.
- * Matches clap's validation: required, conflicts, requires, valueParser, numArgs.
+ * Matches clap's validation: required, exclusive, conflicts, requires,
+ * valueParser, numArgs, requiredUnlessPresent, requiredIfEq, groups.
  * Includes typo suggestion via Levenshtein distance.
  */
 
@@ -92,6 +93,13 @@ function collectKnownFlags(argsDef: ArgsDef): string[] {
         }
       }
     }
+    if (def.visibleAlias) {
+      for (const alias of def.visibleAlias) {
+        if (alias.length > 1) {
+          flags.push(alias);
+        }
+      }
+    }
   }
   // Always include built-in flags
   flags.push('help', 'version');
@@ -156,11 +164,51 @@ function validateUnknownFlags(
   }
 }
 
-/** Validate that all required args are present. */
+/** Validate exclusive args -- cannot be used with any other arg. */
+function validateExclusive(
+  argsDef: ArgsDef,
+  args: Record<string, string | number | boolean | string[]>,
+  explicitlySet: ReadonlySet<string>,
+): void {
+  for (const [key, def] of Object.entries(argsDef)) {
+    if (!def.exclusive) {
+      continue;
+    }
+    if (!explicitlySet.has(key)) {
+      continue;
+    }
+
+    // Check if any other arg was explicitly set
+    for (const otherKey of explicitlySet) {
+      if (otherKey === key) {
+        continue;
+      }
+      const otherDef = argsDef[otherKey];
+      if (!otherDef) {
+        continue;
+      }
+      const flagName = formatFlagForError(key, def);
+      const otherFlagName = formatFlagForError(otherKey, otherDef);
+      throw new CliParseError(
+        `the argument ${flagName} cannot be used with ${otherFlagName}`,
+      );
+    }
+  }
+}
+
+/**
+ * Validate that all required args are present.
+ * Respects requiredUnlessPresent and subcommandNegatesReqs.
+ */
 function validateRequired(
   argsDef: ArgsDef,
   args: Record<string, string | number | boolean | string[]>,
+  skipRequired: boolean,
 ): void {
+  if (skipRequired) {
+    return;
+  }
+
   const missing: string[] = [];
 
   for (const [key, def] of Object.entries(argsDef)) {
@@ -169,6 +217,16 @@ function validateRequired(
     }
     if (def.default !== undefined) {
       continue;
+    }
+
+    // requiredUnlessPresent: skip if the named arg(s) are present
+    if (def.requiredUnlessPresent) {
+      const unlessArgs = Array.isArray(def.requiredUnlessPresent)
+        ? def.requiredUnlessPresent
+        : [def.requiredUnlessPresent];
+      if (unlessArgs.some((name) => isArgSet(args[name], argsDef[name]?.type))) {
+        continue;
+      }
     }
 
     const value = args[key];
@@ -185,13 +243,39 @@ function validateRequired(
   }
 }
 
+/** Validate requiredIfEq -- arg required when another arg equals a specific value. */
+function validateRequiredIfEq(
+  argsDef: ArgsDef,
+  args: Record<string, string | number | boolean | string[]>,
+): void {
+  for (const [key, def] of Object.entries(argsDef)) {
+    if (!def.requiredIfEq) {
+      continue;
+    }
+
+    const [otherKey, otherValue] = def.requiredIfEq;
+    const otherArgValue = args[otherKey];
+
+    // Check if the other arg's value matches the condition
+    if (otherArgValue !== undefined && String(otherArgValue) === otherValue) {
+      if (!isArgSet(args[key], def.type)) {
+        const displayName =
+          def.type === 'positional' ? `<${def.valueName ?? key}>` : `--${def.long ?? key}`;
+        throw new CliParseError(
+          `the following required arguments were not provided:\n  ${displayName}`,
+        );
+      }
+    }
+  }
+}
+
 /** Validate valueParser (enum-like restricted values). */
 function validateValueParser(
   argsDef: ArgsDef,
   args: Record<string, string | number | boolean | string[]>,
 ): void {
   for (const [key, def] of Object.entries(argsDef)) {
-    if (!def.valueParser || def.valueParser.length === 0) {
+    if (!def.valueParser) {
       continue;
     }
 
@@ -201,6 +285,17 @@ function validateValueParser(
     }
 
     const longName = def.long ?? key;
+
+    // Function-based value parser: already applied in parser, skip enum check
+    if (typeof def.valueParser === 'function') {
+      continue;
+    }
+
+    // Enum-style value parser: validate against allowed values
+    if (def.valueParser.length === 0) {
+      continue;
+    }
+
     const valueName = def.valueName ?? longName.toUpperCase();
     const values = Array.isArray(value) ? value : [String(value)];
     for (const v of values) {
@@ -341,10 +436,18 @@ function validateGroups(
  */
 export function validate(parseResult: ParseResult, command: CommandDef): void {
   const argsDef = command.args ?? {};
-  const { args, unknown } = parseResult;
+  const { args, unknown, explicitlySet } = parseResult;
+
+  // Determine if required validation should be skipped (subcommandNegatesReqs)
+  const skipRequired =
+    command.meta.subcommandNegatesReqs === true && parseResult.subCommand !== undefined;
 
   validateUnknownFlags(unknown, argsDef, command);
-  validateRequired(argsDef, args);
+  validateExclusive(argsDef, args, explicitlySet);
+  validateRequired(argsDef, args, skipRequired);
+  if (!skipRequired) {
+    validateRequiredIfEq(argsDef, args);
+  }
   validateValueParser(argsDef, args);
   validateConflicts(argsDef, args);
   validateRequires(argsDef, args);

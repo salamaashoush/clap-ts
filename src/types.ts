@@ -17,6 +17,9 @@ export interface NumArgs {
   readonly max: number;
 }
 
+/** Custom value parser function. Receives raw string, returns parsed value or throws. */
+export type ValueParserFn = (value: string) => unknown;
+
 /** Full argument definition - matches clap::Arg. */
 export interface ArgDef {
   /** Value type for this argument. */
@@ -27,22 +30,47 @@ export interface ArgDef {
   readonly short?: string;
   /** Long flag name (e.g., 'verbose' for --verbose). Defaults to the arg key. */
   readonly long?: string;
-  /** Additional long aliases (e.g., ['dir', 'directory']). */
+  /** Additional aliases (hidden from help). Single-char treated as short, multi-char as long. */
   readonly alias?: readonly string[];
+  /** Visible aliases shown in help output. Registered as working aliases at parse time. */
+  readonly visibleAlias?: readonly string[];
   /** Default value when the argument is not provided. */
   readonly default?: string | number | boolean | readonly string[];
   /** Value to use when the flag is present but no value given (e.g., --port vs --port=8080). */
   readonly defaultMissingValue?: string | number | boolean;
+  /**
+   * Conditional default: [otherArgName, otherArgValue, defaultValue].
+   * If the other arg equals the given value, this default is applied.
+   */
+  readonly defaultValueIf?: readonly [string, string, string | number | boolean];
   /** Whether this argument is required. */
   readonly required?: boolean;
+  /**
+   * Required unless the named arg(s) are present.
+   * Overrides `required: true` when the specified arg(s) are set.
+   */
+  readonly requiredUnlessPresent?: string | readonly string[];
+  /**
+   * Required if another arg equals a specific value: [argName, argValue].
+   * Makes this arg required when the condition is met.
+   */
+  readonly requiredIfEq?: readonly [string, string];
+  /** Cannot be used with ANY other argument. */
+  readonly exclusive?: boolean;
   /** Global arg -- inherited by all subcommands. */
   readonly global?: boolean;
   /** Environment variable fallback (checked if arg not provided on CLI). */
   readonly env?: string;
   /** Display name for the value in help (e.g., "PATH", "PORT"). */
   readonly valueName?: string;
-  /** Restricted set of allowed values (like clap's PossibleValues). */
-  readonly valueParser?: readonly string[];
+  /**
+   * Value validation/parsing. Either:
+   * - A string array of allowed values (enum-like restriction), or
+   * - A function that parses/validates the raw string value (throw to reject).
+   */
+  readonly valueParser?: readonly string[] | ValueParserFn;
+  /** Character to split values on (e.g., ',' for --tags=a,b,c). */
+  readonly valueDelimiter?: string;
   /** Min/max number of values this arg accepts. */
   readonly numArgs?: NumArgs;
   /** Names of args that conflict with this one (mutually exclusive). */
@@ -51,14 +79,55 @@ export interface ArgDef {
   readonly requires?: readonly string[];
   /** How values are collected: set (replace), append (collect into array), count. */
   readonly action?: ArgAction;
-  /** Hide this argument from help output. */
+  /** Hide this argument from all help output. */
   readonly hidden?: boolean;
+  /** Hide this argument from short help (-h) only. */
+  readonly hideShortHelp?: boolean;
+  /** Hide this argument from long help (--help) only. */
+  readonly hideLongHelp?: boolean;
+  /** Hide possible values list from help (when valueParser is string[]). */
+  readonly hidePossibleValues?: boolean;
   /** Description for the --no-X variant of boolean flags. */
   readonly negativeDescription?: string;
+  /** Accept values that start with a hyphen (e.g., --grep -pattern). */
+  readonly allowHyphenValues?: boolean;
+  /** Accept negative numbers as values (e.g., --offset -10). */
+  readonly allowNegativeNumbers?: boolean;
+  /** Mark as trailing var arg -- last positional consumes all remaining args. */
+  readonly trailingVarArg?: boolean;
+  /** Positional that requires -- before it (like clap's last()). */
+  readonly last?: boolean;
+  /** Custom section heading in help output (groups args under this heading). */
+  readonly helpHeading?: string;
 }
 
 /** Record of argument name to definition. */
 export type ArgsDef = Record<string, ArgDef>;
+
+// ---- Style Customization ----
+
+/** Style function that applies formatting to a string. */
+export type StyleFn = (s: string) => string;
+
+/** Customizable style definitions for help and error output. */
+export interface StylesDef {
+  /** Bold text (used for error prefix). */
+  readonly bold: StyleFn;
+  /** Yellow text. */
+  readonly yellow: StyleFn;
+  /** Green text. */
+  readonly green: StyleFn;
+  /** Cyan text. */
+  readonly cyan: StyleFn;
+  /** Section headings (e.g., "Usage:", "Options:"). */
+  readonly heading: StyleFn;
+  /** Flag names (e.g., --verbose, -v). */
+  readonly flag: StyleFn;
+  /** Value placeholders (e.g., <PORT>, <ENV>). */
+  readonly value: StyleFn;
+  /** Command/subcommand names. */
+  readonly command: StyleFn;
+}
 
 // ---- Command Types ----
 
@@ -74,12 +143,34 @@ export interface CommandMeta {
   readonly about?: string;
   /** Extended help text (shown with --help, not -h). */
   readonly longAbout?: string;
+  /** Text prepended before the help output. */
+  readonly beforeHelp?: string;
   /** Text appended after the help output. */
   readonly afterHelp?: string;
   /** Hide this command from parent's help subcommand list. */
   readonly hidden?: boolean;
   /** Visible aliases shown next to the command name in help. */
   readonly aliases?: readonly string[];
+  /** Require a subcommand to be provided. */
+  readonly subcommandRequired?: boolean;
+  /** Accept partial subcommand names (e.g., 'ser' matches 'serve'). */
+  readonly inferSubcommands?: boolean;
+  /** Accept partial long arg names (e.g., '--verb' matches '--verbose'). */
+  readonly inferLongArgs?: boolean;
+  /** Parent args and subcommands are mutually exclusive. */
+  readonly argsConflictsWithSubcommands?: boolean;
+  /** Accept subcommands not defined in subCommands. Passed to parent run handler. */
+  readonly allowExternalSubcommands?: boolean;
+  /** When a subcommand is present, parent's required args are waived. */
+  readonly subcommandNegatesReqs?: boolean;
+  /** Show help if no arguments are provided (instead of running). */
+  readonly argRequiredElseHelp?: boolean;
+  /**
+   * Custom help template with placeholders:
+   * {name}, {version}, {about}, {usage}, {all-args}, {arguments},
+   * {options}, {commands}, {before-help}, {after-help}
+   */
+  readonly helpTemplate?: string;
 }
 
 /** Argument group - for organizing related args (like clap's ArgGroup). */
@@ -172,6 +263,8 @@ export interface RunOptions {
   readonly exit?: boolean;
   /** Show help on empty args when command has subcommands (default: true). */
   readonly showHelpOnEmpty?: boolean;
+  /** Custom styles for help and error output. */
+  readonly styles?: Partial<StylesDef>;
 }
 
 // ---- Parser Result ----
@@ -188,8 +281,12 @@ export interface ParseResult {
   readonly subCommand?: string;
   /** Whether --help / -h was requested. */
   readonly helpRequested: boolean;
+  /** Whether -h (short) was used vs --help (long). */
+  readonly helpIsShort: boolean;
   /** Whether --version / -V was requested. */
   readonly versionRequested: boolean;
   /** Unknown flags that were passed. */
   readonly unknown: readonly string[];
+  /** Set of arg keys that were explicitly provided (not defaults or env). */
+  readonly explicitlySet: ReadonlySet<string>;
 }

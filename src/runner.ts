@@ -1,6 +1,8 @@
 /**
  * Command runner - entry point for CLI execution.
  * Handles subcommand resolution, lifecycle hooks, error handling.
+ * Supports inferSubcommands, subcommandRequired, allowExternalSubcommands,
+ * argsConflictsWithSubcommands, argRequiredElseHelp, and custom styles.
  */
 
 import type {
@@ -10,6 +12,7 @@ import type {
   CommandDef,
   ParsedArgs,
   RunOptions,
+  StylesDef,
 } from './types.js';
 import {
   CliParseError,
@@ -55,7 +58,6 @@ export function defineCommand<const T extends ArgsDef>(def: CommandDef<T>): Comm
  *   env: { type: 'string', valueParser: ['dev', 'staging', 'prod'] },
  *   dev: { type: 'boolean', conflictsWith: ['env', 'staging', 'prod'] },
  * });
- * // envArgs.env.type is 'string' (not ArgType)
  * ```
  */
 export function defineArgs<const T extends ArgsDef>(args: T): T {
@@ -67,7 +69,6 @@ export function defineArgs<const T extends ArgsDef>(args: T): T {
  *
  * ```ts
  * const portArg = defineArg({ type: 'number', short: 'p', default: 3003 });
- * // portArg.type is 'number' (not ArgType)
  * ```
  */
 export function defineArg<const T extends ArgDef>(arg: T): T {
@@ -77,8 +78,33 @@ export function defineArg<const T extends ArgDef>(arg: T): T {
 // ---- Subcommand Resolution ----
 
 /**
+ * Find a subcommand by prefix matching (inferSubcommands).
+ * Returns the match if exactly one, 'ambiguous' if multiple, undefined if none.
+ */
+function findSubcommandByPrefix(
+  subCommands: Record<string, CommandDef>,
+  token: string,
+): { name: string; def: CommandDef } | 'ambiguous' | undefined {
+  const matches: { name: string; def: CommandDef }[] = [];
+  for (const [name, def] of Object.entries(subCommands)) {
+    if (name.startsWith(token)) {
+      matches.push({ name, def });
+    } else if (def.meta.aliases?.some((a) => a.startsWith(token))) {
+      matches.push({ name, def });
+    }
+  }
+  if (matches.length === 1) {
+    return matches[0];
+  }
+  if (matches.length > 1) {
+    return 'ambiguous';
+  }
+  return undefined;
+}
+
+/**
  * Resolve the command chain from the root command and raw args.
- * Returns the resolved command, remaining args, and parent name chain.
+ * Supports inferSubcommands for prefix matching.
  */
 function resolveCommandChain(
   rootCommand: CommandDef,
@@ -87,13 +113,13 @@ function resolveCommandChain(
   command: CommandDef;
   remainingArgs: string[];
   parentNames: string[];
+  externalSubcommand?: string;
 } {
   let current = rootCommand;
   const parentNames: string[] = [];
   const remaining = [...rawArgs];
 
-  // Walk into subcommands
-  while (remaining.length > 0 && current.subCommands) {
+  while (remaining.length > 0 && (current.subCommands || current.meta.allowExternalSubcommands)) {
     const token = remaining[0]!;
 
     // Don't interpret flags as subcommands
@@ -102,21 +128,43 @@ function resolveCommandChain(
     }
 
     // Direct match
-    const subCmd = current.subCommands[token];
-    if (subCmd) {
-      parentNames.push(current.meta.name);
-      current = subCmd;
-      remaining.shift();
-      continue;
+    if (current.subCommands) {
+      const subCmd = current.subCommands[token];
+      if (subCmd) {
+        parentNames.push(current.meta.name);
+        current = subCmd;
+        remaining.shift();
+        continue;
+      }
+
+      // Alias match
+      const aliasMatch = findSubcommandByAlias(current.subCommands, token);
+      if (aliasMatch) {
+        parentNames.push(current.meta.name);
+        current = aliasMatch;
+        remaining.shift();
+        continue;
+      }
+
+      // inferSubcommands: try prefix matching
+      if (current.meta.inferSubcommands) {
+        const prefixMatch = findSubcommandByPrefix(current.subCommands, token);
+        if (prefixMatch === 'ambiguous') {
+          break;
+        }
+        if (prefixMatch) {
+          parentNames.push(current.meta.name);
+          current = prefixMatch.def;
+          remaining.shift();
+          continue;
+        }
+      }
     }
 
-    // Alias match
-    const aliasMatch = findSubcommandByAlias(current.subCommands, token);
-    if (aliasMatch) {
-      parentNames.push(current.meta.name);
-      current = aliasMatch;
+    // allowExternalSubcommands: accept unknown subcommand and stop
+    if (current.meta.allowExternalSubcommands) {
       remaining.shift();
-      continue;
+      return { command: current, remainingArgs: remaining, parentNames, externalSubcommand: token };
     }
 
     // Not a subcommand, stop resolution
@@ -149,11 +197,13 @@ export async function runCommand<T extends ArgsDef>(
   command: CommandDef<T>,
   args: ParsedArgs<T>,
   rawArgs: readonly string[] = [],
+  subCommand?: string,
 ): Promise<void> {
   const ctx: CommandContext<T> = {
     rawArgs,
     args,
     cmd: command,
+    subCommand,
     data: {},
   };
 
@@ -178,7 +228,6 @@ export async function runCommand<T extends ArgsDef>(
     try {
       await command.cleanup(ctx);
     } catch (error) {
-      // If run also failed, keep the original error
       runError ??= error;
     }
   }
@@ -187,7 +236,7 @@ export async function runCommand<T extends ArgsDef>(
     if (runError instanceof Error) {
       throw runError;
     }
-    throw new Error(runError instanceof Error ? runError.message : JSON.stringify(runError));
+    throw new Error(JSON.stringify(runError));
   }
 }
 
@@ -206,12 +255,11 @@ function collectSubcommandNames(subCommands: Record<string, CommandDef>): string
 
 /**
  * Find the closest match for a string among candidates using simple character diff.
- * Returns undefined if no candidate is within the distance threshold.
  */
 function findClosestSubcommand(target: string, candidates: string[]): string | undefined {
   const a = target.toLowerCase();
   let bestMatch: string | undefined;
-  let bestDist = 4; // max distance threshold
+  let bestDist = 4;
 
   for (const name of candidates) {
     const b = name.toLowerCase();
@@ -243,9 +291,15 @@ function simpleCharDistance(a: string, b: string, maxDist: number): number {
 
 // ---- runMain helpers ----
 
-/** Handle --help request. */
-function handleHelpRequest(command: CommandDef, parentNames: string[], shouldExit: boolean): void {
-  showHelp(command, parentNames.length > 0 ? parentNames : undefined);
+/** Handle --help request with mode and style support. */
+function handleHelpRequest(
+  command: CommandDef,
+  parentNames: string[],
+  shouldExit: boolean,
+  isShortHelp: boolean,
+  styles?: Partial<StylesDef>,
+): void {
+  showHelp(command, parentNames.length > 0 ? parentNames : undefined, isShortHelp, styles);
   if (shouldExit) {
     process.exit(0);
   }
@@ -270,6 +324,7 @@ function handleUnrecognizedSubcommand(
   command: CommandDef,
   parentNames: string[],
   shouldExit: boolean,
+  styles?: Partial<StylesDef>,
 ): void {
   const allNames = collectSubcommandNames(command.subCommands!);
   let msg = `unrecognized subcommand '${unknownName}'`;
@@ -279,7 +334,7 @@ function handleUnrecognizedSubcommand(
     msg += `\n\n  tip: a similar subcommand exists: '${bestMatch}'`;
   }
 
-  showError(msg, command, parentNames.length > 0 ? parentNames : undefined);
+  showError(msg, command, parentNames.length > 0 ? parentNames : undefined, styles);
   if (shouldExit) {
     process.exit(2);
   }
@@ -299,12 +354,27 @@ function handleUnrecognizedSubcommand(
 export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): Promise<void> {
   const shouldExit = opts?.exit !== false;
   const showHelpOnEmpty = opts?.showHelpOnEmpty !== false;
+  const styles = opts?.styles;
 
   try {
     const rawArgs = getRawArgs(opts?.argv);
 
-    // Resolve subcommand chain
-    const { command, remainingArgs, parentNames } = resolveCommandChain(rootCommand, rawArgs);
+    // Resolve subcommand chain (with inferSubcommands and allowExternalSubcommands)
+    const { command, remainingArgs, parentNames, externalSubcommand } =
+      resolveCommandChain(rootCommand, rawArgs);
+
+    // Handle external subcommand: pass to parent command's run handler
+    if (externalSubcommand) {
+      if (command.run) {
+        await runCommand(
+          command,
+          { } as ParsedArgs<ArgsDef>,
+          remainingArgs,
+          externalSubcommand,
+        );
+      }
+      return;
+    }
 
     // Merge global args from parent into resolved command
     const globalArgs = collectGlobalArgs(rootCommand);
@@ -318,7 +388,7 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
 
     // Handle --help
     if (parseResult.helpRequested) {
-      handleHelpRequest(effectiveCommand, parentNames, shouldExit);
+      handleHelpRequest(effectiveCommand, parentNames, shouldExit, parseResult.helpIsShort, styles);
       return;
     }
 
@@ -335,7 +405,13 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
       rootCommand.subCommands &&
       Object.keys(rootCommand.subCommands).length > 0
     ) {
-      handleHelpRequest(rootCommand, [], shouldExit);
+      handleHelpRequest(rootCommand, [], shouldExit, false, styles);
+      return;
+    }
+
+    // argRequiredElseHelp: show help if no args were explicitly provided
+    if (command.meta.argRequiredElseHelp && parseResult.explicitlySet.size === 0) {
+      handleHelpRequest(command, parentNames, shouldExit, false, styles);
       return;
     }
 
@@ -347,12 +423,48 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
       !command.run &&
       !parseResult.subCommand
     ) {
-      if (parseResult.positionals.length > 0) {
-        handleUnrecognizedSubcommand(parseResult.positionals[0]!, command, parentNames, shouldExit);
+      // subcommandRequired: error if no subcommand
+      if (command.meta.subcommandRequired) {
+        if (parseResult.positionals.length > 0) {
+          handleUnrecognizedSubcommand(
+            parseResult.positionals[0]!, command, parentNames, shouldExit, styles,
+          );
+        } else {
+          showError("a subcommand is required but one was not provided", command,
+            parentNames.length > 0 ? parentNames : undefined, styles);
+          if (shouldExit) {
+            process.exit(2);
+          }
+        }
         return;
       }
 
-      handleHelpRequest(command, parentNames, shouldExit);
+      if (parseResult.positionals.length > 0) {
+        handleUnrecognizedSubcommand(
+          parseResult.positionals[0]!, command, parentNames, shouldExit, styles,
+        );
+        return;
+      }
+
+      handleHelpRequest(command, parentNames, shouldExit, false, styles);
+      return;
+    }
+
+    // argsConflictsWithSubcommands: error if args + subcommand both present
+    if (
+      command.meta.argsConflictsWithSubcommands &&
+      parseResult.subCommand &&
+      parseResult.explicitlySet.size > 0
+    ) {
+      showError(
+        "arguments cannot be used with subcommands",
+        command,
+        parentNames.length > 0 ? parentNames : undefined,
+        styles,
+      );
+      if (shouldExit) {
+        process.exit(2);
+      }
       return;
     }
 
@@ -363,7 +475,7 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
     await runCommand(effectiveCommand, parseResult.args as ParsedArgs<ArgsDef>, rawArgs);
   } catch (error) {
     if (error instanceof CliParseError) {
-      showError(error.message, rootCommand);
+      showError(error.message, rootCommand, undefined, styles);
       if (shouldExit) {
         process.exit(2);
       }

@@ -13,7 +13,9 @@
  *   env variable fallback, action: 'append' (via multiple:true), action: 'count',
  *   numArgs with defaultMissingValue, global args merge, valueParser enum validation
  *   (in validation.ts), number type coercion, kebab-to-camel mapping,
- *   required arg validation (in validation.ts), typo suggestions (in validation.ts).
+ *   required arg validation (in validation.ts), typo suggestions (in validation.ts),
+ *   valueDelimiter splitting, function valueParser, trailingVarArg, last,
+ *   allowHyphenValues, allowNegativeNumbers, inferLongArgs, defaultValueIf.
  */
 
 import { parseArgs as nodeParseArgs } from 'node:util';
@@ -59,13 +61,16 @@ interface FlagEntry {
 /**
  * Build lookup maps from all possible flag forms to the canonical arg name.
  * Used for post-processing parseArgs output back to our ArgDef keys.
+ * Registers both hidden aliases and visible aliases.
  */
 function buildFlagMaps(argsDef: ArgsDef): {
   longMap: Map<string, FlagEntry>;
   shortMap: Map<string, { key: string; def: ArgDef }>;
+  hasHyphenOrNegative: boolean;
 } {
   const longMap = new Map<string, FlagEntry>();
   const shortMap = new Map<string, { key: string; def: ArgDef }>();
+  let hasHyphenOrNegative = false;
 
   for (const [key, def] of Object.entries(argsDef)) {
     const longName = def.long ?? key;
@@ -75,8 +80,24 @@ function buildFlagMaps(argsDef: ArgsDef): {
       longMap.set(`no-${longName}`, { key, def, negated: true });
     }
 
+    if (def.allowHyphenValues || def.allowNegativeNumbers) {
+      hasHyphenOrNegative = true;
+    }
+
+    // Register hidden aliases
     if (def.alias) {
       for (const alias of def.alias) {
+        if (alias.length === 1) {
+          shortMap.set(alias, { key, def });
+        } else {
+          longMap.set(alias, { key, def, negated: false });
+        }
+      }
+    }
+
+    // Register visible aliases (also work as real aliases at parse time)
+    if (def.visibleAlias) {
+      for (const alias of def.visibleAlias) {
         if (alias.length === 1) {
           shortMap.set(alias, { key, def });
         } else {
@@ -90,24 +111,16 @@ function buildFlagMaps(argsDef: ArgsDef): {
     }
   }
 
-  return { longMap, shortMap };
+  return { longMap, shortMap, hasHyphenOrNegative };
 }
 
 // ---- Build parseArgs options config ----
 
 /**
  * Build the `options` config that node:util parseArgs expects from our ArgDef definitions.
- *
- * Mapping:
- * - boolean type -> parseArgs type: 'boolean'
- * - string/number/enum type -> parseArgs type: 'string'
- * - action: 'count' -> type: 'boolean', multiple: true (count array length)
- * - action: 'append' -> type: 'string', multiple: true
- * - boolean --no-<flag> -> separate boolean entry
  */
 function buildParseArgsOptions(argsDef: ArgsDef): {
   options: Record<string, { type: 'string' | 'boolean'; short?: string; multiple?: boolean }>;
-  /** Set of long option names that have optional values (numArgs.min === 0) */
   optionalValueFlags: Set<string>;
 } {
   const options: Record<
@@ -127,7 +140,6 @@ function buildParseArgsOptions(argsDef: ArgsDef): {
       options[longName] = { type: 'boolean', multiple: true };
     } else if (def.type === 'boolean') {
       options[longName] = { type: 'boolean' };
-      // --no-<flag> negation
       options[`no-${longName}`] = { type: 'boolean' };
     } else if (def.action === 'append') {
       options[longName] = { type: 'string', multiple: true };
@@ -135,30 +147,31 @@ function buildParseArgsOptions(argsDef: ArgsDef): {
       options[longName] = { type: 'string' };
     }
 
-    // Track optional-value flags (numArgs.min === 0 on non-boolean args).
-    // These need special pre-processing since parseArgs can't handle
-    // --flag without a value when the option type is 'string'.
     if (def.numArgs && def.numArgs.min === 0 && def.type !== 'boolean') {
       optionalValueFlags.add(longName);
     }
 
-    // Short flag
     if (def.short && def.short.length === 1) {
       options[longName].short = def.short;
     }
 
-    // Aliases: register multi-char as separate long entries, single-char as short
-    if (def.alias) {
-      const opt = options[longName];
-      for (const alias of def.alias) {
+    // Register hidden and visible aliases
+    const registerAliases = (aliases: readonly string[]) => {
+      const opt = options[longName]!;
+      for (const alias of aliases) {
         if (alias.length > 1 || opt.short) {
-          // Long alias or short slot already taken: register as separate option
           options[alias] = { type: opt.type, multiple: opt.multiple };
         } else {
-          // Use this single-char alias as the short flag
           opt.short = alias;
         }
       }
+    };
+
+    if (def.alias) {
+      registerAliases(def.alias);
+    }
+    if (def.visibleAlias) {
+      registerAliases(def.visibleAlias);
     }
   }
 
@@ -169,7 +182,7 @@ function buildParseArgsOptions(argsDef: ArgsDef): {
   return { options, optionalValueFlags };
 }
 
-// ---- Pre-scan for Optional-Value Args ----
+// ---- Pre-scan / Preprocessing ----
 
 /** Check if the next token looks like a flag (not a value). */
 function isNextTokenAFlag(nextToken: string | undefined): boolean {
@@ -177,6 +190,11 @@ function isNextTokenAFlag(nextToken: string | undefined): boolean {
     nextToken === undefined ||
     (nextToken.startsWith('-') && nextToken !== '-' && nextToken !== '--')
   );
+}
+
+/** Check if a token looks like a negative number (e.g., -1, -3.14, -0). */
+function looksLikeNegativeNumber(token: string): boolean {
+  return /^-\d/.test(token);
 }
 
 /** Try to match a long flag token as an optional-value flag without a value. */
@@ -223,18 +241,39 @@ function tryStripOptionalShort(
 }
 
 /**
- * parseArgs cannot handle --flag that optionally takes a value (type: 'string'
- * without a value would consume the next positional or throw). We pre-scan the
- * raw args and, for optional-value flags that appear without a value, we strip
- * them out and record their default. The rest goes through parseArgs normally.
+ * Resolve a flag token to its key and ArgDef, checking both long and short maps.
+ * Returns the canonical key (used as fallback long name) and the def.
  */
-function extractOptionalValueFlags(
+function resolveFlag(
+  token: string,
+  longMap: Map<string, FlagEntry>,
+  shortMap: Map<string, { key: string; def: ArgDef }>,
+): { key: string; def: ArgDef } | undefined {
+  if (token.startsWith('--') && token.length > 2) {
+    const flagName = token.includes('=') ? token.slice(2, token.indexOf('=')) : token.slice(2);
+    const entry = longMap.get(flagName);
+    return entry ? { key: entry.key, def: entry.def } : undefined;
+  }
+  if (token.startsWith('-') && token.length === 2 && token[1] !== '-') {
+    return shortMap.get(token[1]!) ?? undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Pre-process raw args before passing to node:util parseArgs.
+ * Handles:
+ * 1. Optional-value flags (strip bare flags, record defaults)
+ * 2. allowHyphenValues / allowNegativeNumbers (rewrite --flag -value to --flag=-value)
+ */
+function preprocessArgs(
   rawArgs: readonly string[],
   optionalValueFlags: Set<string>,
   longMap: Map<string, FlagEntry>,
   shortMap: Map<string, { key: string; def: ArgDef }>,
+  hasHyphenOrNegative: boolean,
 ): { processedArgs: string[]; optionalDefaults: Map<string, string | number | boolean> } {
-  if (optionalValueFlags.size === 0) {
+  if (optionalValueFlags.size === 0 && !hasHyphenOrNegative) {
     return { processedArgs: [...rawArgs], optionalDefaults: new Map() };
   }
 
@@ -253,23 +292,44 @@ function extractOptionalValueFlags(
       continue;
     }
 
-    // Long flag without =value
-    const stripped = tryStripOptionalLong(token, rawArgs[i + 1], optionalValueFlags, longMap);
+    const nextToken = rawArgs[i + 1];
+
+    // Optional-value flag handling (long)
+    const stripped = tryStripOptionalLong(token, nextToken, optionalValueFlags, longMap);
     if (stripped) {
       optionalDefaults.set(stripped.key, stripped.defaultVal);
-      continue; // strip this token
+      continue;
     }
 
-    // Short flag (single char) for optional-value arg
+    // Optional-value flag handling (short)
     const strippedShort = tryStripOptionalShort(
       token,
-      rawArgs[i + 1],
+      nextToken,
       optionalValueFlags,
       shortMap,
     );
     if (strippedShort) {
       optionalDefaults.set(strippedShort.key, strippedShort.defaultVal);
-      continue; // strip
+      continue;
+    }
+
+    // allowHyphenValues / allowNegativeNumbers:
+    // If this token is a known flag and the next token starts with - but the flag's
+    // def allows hyphen values or negative numbers, rewrite to --flag=-value
+    if (nextToken && nextToken.startsWith('-') && nextToken !== '-' && nextToken !== '--') {
+      const resolved = resolveFlag(token, longMap, shortMap);
+      if (resolved && resolved.def.type !== 'boolean' && resolved.def.type !== 'positional') {
+        const shouldRewrite =
+          resolved.def.allowHyphenValues ||
+          (resolved.def.allowNegativeNumbers && looksLikeNegativeNumber(nextToken));
+        if (shouldRewrite && !token.includes('=')) {
+          // Rewrite to --longName=value form so node:util parseArgs treats it as a value
+          const longName = resolved.def.long ?? resolved.key;
+          processedArgs.push(`--${longName}=${nextToken}`);
+          i++; // skip the next token (consumed as value)
+          continue;
+        }
+      }
     }
 
     processedArgs.push(token);
@@ -281,6 +341,25 @@ function extractOptionalValueFlags(
 // ---- Coerce Value ----
 
 function coerceValue(value: string, def: ArgDef, argName: string): string | number | boolean {
+  // If a function valueParser is defined, use it for coercion
+  if (typeof def.valueParser === 'function') {
+    try {
+      const parsed = def.valueParser(value);
+      // Ensure the result is a valid ParseResult value type
+      if (
+        typeof parsed === 'string' ||
+        typeof parsed === 'number' ||
+        typeof parsed === 'boolean'
+      ) {
+        return parsed;
+      }
+      return String(parsed);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      throw new CliParseError(`invalid value '${value}' for '${argName}': ${msg}`);
+    }
+  }
+
   switch (def.type) {
     case 'boolean': {
       const lower = value.toLowerCase();
@@ -339,7 +418,6 @@ function splitPositionalsAndRest(
   rawArgs: readonly string[],
   parseArgsPositionals: readonly string[],
 ): { positionals: string[]; rest: string[] } {
-  // Find the -- separator index in rawArgs
   let dashDashIdx = -1;
   for (let i = 0; i < rawArgs.length; i++) {
     if (rawArgs[i] === '--') {
@@ -352,7 +430,6 @@ function splitPositionalsAndRest(
     return { positionals: [...parseArgsPositionals], rest: [] };
   }
 
-  // Count tokens after -- in rawArgs to know how many trailing positionals are rest
   const restCount = rawArgs.length - dashDashIdx - 1;
   const totalPositionals = parseArgsPositionals.length;
   const beforeCount = totalPositionals - restCount;
@@ -363,36 +440,66 @@ function splitPositionalsAndRest(
   };
 }
 
+// ---- Infer Long Args ----
+
+/**
+ * Try to resolve an unknown long flag by prefix matching.
+ * Returns the matched entry if exactly one match, undefined otherwise.
+ */
+function tryInferLongArg(
+  flagName: string,
+  longMap: Map<string, FlagEntry>,
+): FlagEntry | undefined {
+  const matches: FlagEntry[] = [];
+  for (const [name, entry] of longMap) {
+    if (name.startsWith(flagName) && !entry.negated) {
+      matches.push(entry);
+    }
+  }
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+// ---- Value Delimiter Splitting ----
+
+/**
+ * Split a string value by the delimiter and return as array.
+ * Applied after initial parsing for args with valueDelimiter.
+ */
+function splitByDelimiter(value: string | string[], delimiter: string): string[] {
+  if (Array.isArray(value)) {
+    const result: string[] = [];
+    for (const v of value) {
+      result.push(...v.split(delimiter));
+    }
+    return result;
+  }
+  return value.split(delimiter);
+}
+
 // ---- Main Parser ----
 
 /**
  * Parse raw argument tokens against a command definition.
  *
- * Uses node:util parseArgs for core tokenizing (--flag, --flag=value, -f, -fvalue,
- * -abc combined shorts, -- separator, positionals), then layers on:
- * - numArgs with defaultMissingValue (optional-value flags)
- * - action: 'count' (from boolean[] length)
- * - number type coercion
- * - subcommand detection
- * - env variable fallback
- * - default values
- * - kebab-case to camelCase mapping
+ * Uses node:util parseArgs for core tokenizing, then layers on all clap-ts features.
  */
 export function parseArgs(rawArgs: readonly string[], command: CommandDef): ParseResult {
   const argsDef = command.args ?? {};
+  const inferLong = command.meta.inferLongArgs === true;
 
   // Build parseArgs config from our ArgDef definitions
   const { options, optionalValueFlags } = buildParseArgsOptions(argsDef);
 
   // Build flag maps once and reuse throughout parsing
-  const { longMap, shortMap } = buildFlagMaps(argsDef);
+  const { longMap, shortMap, hasHyphenOrNegative } = buildFlagMaps(argsDef);
 
-  // Pre-process: extract optional-value flags that parseArgs can't handle
-  const { processedArgs, optionalDefaults } = extractOptionalValueFlags(
+  // Pre-process: handle optional-value flags, allowHyphenValues, allowNegativeNumbers
+  const { processedArgs, optionalDefaults } = preprocessArgs(
     rawArgs,
     optionalValueFlags,
     longMap,
     shortMap,
+    hasHyphenOrNegative,
   );
 
   // Run node:util parseArgs (strict: false so unknown flags don't throw)
@@ -415,8 +522,9 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
   const unknown: string[] = [];
   const explicitlySet = new Set<string>();
 
-  // Extract help/version
+  // Extract help/version and detect short vs long help
   const helpRequested = values['help'] === true;
+  const helpIsShort = helpRequested && rawArgs.some((a) => a === '-h');
   const versionRequested = values['version'] === true;
 
   // Process each parsed value back through our ArgDef system
@@ -443,25 +551,23 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
       continue;
     }
 
-    // Check short map for single-char aliases registered as separate options
+    // Check short map
     const shortEntry = shortMap.get(parsedKey);
     if (shortEntry) {
       applyValue(shortEntry.key, shortEntry.def, rawValue, result, explicitlySet);
       continue;
     }
 
-    // Check alias entries (multi-char aliases that may not be in longMap)
-    let foundAlias = false;
-    for (const [key, def] of Object.entries(argsDef)) {
-      if (def.alias?.includes(parsedKey)) {
-        applyValue(key, def, rawValue, result, explicitlySet);
-        foundAlias = true;
-        break;
+    // inferLongArgs: try prefix matching on unknown long flags
+    if (inferLong) {
+      const inferred = tryInferLongArg(parsedKey, longMap);
+      if (inferred) {
+        applyValue(inferred.key, inferred.def, rawValue, result, explicitlySet);
+        continue;
       }
     }
-    if (!foundAlias) {
-      unknown.push(`--${parsedKey}`);
-    }
+
+    unknown.push(`--${parsedKey}`);
   }
 
   // Apply optional-value defaults from pre-scan
@@ -495,11 +601,44 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
       positionalDefs.push({ key, def });
     }
   }
-  for (let p = 0; p < positionalDefs.length && p < positionals.length; p++) {
+
+  for (let p = 0; p < positionalDefs.length; p++) {
     const { key, def } = positionalDefs[p]!;
-    const value = positionals[p]!;
-    result[key] = coerceValue(value, def, key);
-    explicitlySet.add(key);
+
+    // last: this positional only gets values from rest (after --)
+    if (def.last) {
+      if (rest.length > 0) {
+        result[key] = rest[0]!;
+        explicitlySet.add(key);
+      }
+      continue;
+    }
+
+    // trailingVarArg: consume all remaining positionals as an array
+    if (def.trailingVarArg) {
+      if (p < positionals.length) {
+        result[key] = positionals.slice(p);
+        explicitlySet.add(key);
+      }
+      break; // no more positional defs to process
+    }
+
+    // Normal positional assignment
+    if (p < positionals.length) {
+      result[key] = coerceValue(positionals[p]!, def, key);
+      explicitlySet.add(key);
+    }
+  }
+
+  // Apply valueDelimiter splitting for args that have it
+  for (const [key, def] of Object.entries(argsDef)) {
+    if (!def.valueDelimiter || !explicitlySet.has(key)) {
+      continue;
+    }
+    const value = result[key];
+    if (value !== undefined && (typeof value === 'string' || Array.isArray(value))) {
+      result[key] = splitByDelimiter(value, def.valueDelimiter);
+    }
   }
 
   // Apply env var fallbacks for args not explicitly set
@@ -517,14 +656,32 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
         : (globalThis.Bun as { env: Record<string, string | undefined> }).env[def.env];
 
     if (envValue !== undefined && envValue !== '') {
-      result[key] = coerceValue(envValue, def, `env:${def.env}`);
+      if (def.valueDelimiter) {
+        result[key] = envValue.split(def.valueDelimiter);
+      } else {
+        result[key] = coerceValue(envValue, def, `env:${def.env}`);
+      }
       explicitlySet.add(key);
     }
   }
 
-  // Apply defaults for args not explicitly set and not from env
+  // Apply conditional defaults (defaultValueIf) before static defaults
   for (const [key, def] of Object.entries(argsDef)) {
     if (explicitlySet.has(key)) {
+      continue;
+    }
+    if (def.defaultValueIf) {
+      const [otherKey, otherValue, conditionalDefault] = def.defaultValueIf;
+      if (String(result[otherKey]) === String(otherValue)) {
+        result[key] = conditionalDefault;
+        continue; // skip static default
+      }
+    }
+  }
+
+  // Apply static defaults for args not explicitly set and not from env
+  for (const [key, def] of Object.entries(argsDef)) {
+    if (explicitlySet.has(key) || result[key] !== undefined) {
       continue;
     }
     if (def.default !== undefined) {
@@ -543,8 +700,9 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
   // Convert keys to camelCase for the result
   const camelResult: Record<string, string | number | boolean | string[]> = {};
   for (const [key, value] of Object.entries(result)) {
-    camelResult[kebabToCamel(key)] = value;
-    if (key !== kebabToCamel(key)) {
+    const camelKey = kebabToCamel(key);
+    camelResult[camelKey] = value;
+    if (key !== camelKey) {
       camelResult[key] = value;
     }
   }
@@ -555,8 +713,10 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
     rest,
     subCommand,
     helpRequested,
+    helpIsShort,
     versionRequested,
     unknown,
+    explicitlySet,
   };
 }
 
@@ -564,7 +724,7 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
 
 /**
  * Apply a raw value from parseArgs into the result, handling count, append,
- * number coercion, and boolean conversion.
+ * number coercion, boolean conversion, and function valueParser.
  */
 function applyValue(
   key: string,
@@ -574,7 +734,6 @@ function applyValue(
   explicitlySet: Set<string>,
 ): void {
   if (def.action === 'count') {
-    // parseArgs returns boolean[] for multiple:true boolean options
     if (Array.isArray(rawValue)) {
       result[key] = rawValue.length;
     } else {
@@ -591,10 +750,9 @@ function applyValue(
   }
 
   if (def.action === 'append') {
-    // parseArgs returns string[] for multiple:true string options
+    // node:util parseArgs returns string[] for multiple:true string options
     if (Array.isArray(rawValue)) {
-      const values = (rawValue as string[]).map(String);
-      result[key] = values;
+      result[key] = rawValue as string[];
     } else if (typeof rawValue === 'string') {
       result[key] = [rawValue];
     }
