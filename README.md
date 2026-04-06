@@ -8,16 +8,21 @@ Full clap-style parsing, validation, help generation, and subcommand support. Ze
 
 - **Full type inference** -- `defineCommand` infers exact types for parsed args, no casts needed
 - **Clap-compatible argument model** -- boolean, string, number, enum, positional args with short/long flags
-- **Subcommands** -- nested command trees with alias support and automatic resolution
-- **Validation** -- required, conflictsWith, requires, valueParser (enum), numArgs, argument groups
-- **Clap-style help** -- colored, terminal-width-aware help output matching clap's format
+- **Subcommands** -- nested command trees with alias support, prefix inference, and external subcommands
+- **Validation** -- required, exclusive, conflictsWith, requires, requiredUnlessPresent, requiredIfEq, valueParser, numArgs, argument groups
+- **Custom value parsers** -- function-based parsers for custom validation and type conversion
+- **Clap-style help** -- colored, terminal-width-aware help with custom headings, templates, and styles
 - **Clap-style errors** -- "did you mean?" typo suggestions via Levenshtein distance
 - **Environment variable fallback** -- `env` field on args, with CLI > env > default precedence
 - **Lifecycle hooks** -- setup/run/cleanup pattern for resource management
 - **Actions** -- `set` (default), `append` (collect into array), `count` (e.g. `-vvv` = 3)
+- **Value delimiters** -- `--tags=a,b,c` splits into array with `valueDelimiter`
 - **Boolean negation** -- `--no-verbose` automatically supported for boolean flags
 - **Global args** -- `global: true` args inherited by all subcommands
 - **Reusable arg groups** -- `defineArgs()` + spread for sharing args across commands
+- **Trailing var args** -- last positional consumes all remaining args
+- **Negative numbers** -- `--offset -10` with `allowNegativeNumbers`
+- **Hyphen values** -- `--grep -pattern` with `allowHyphenValues`
 - **Zero dependencies** -- only uses `node:util` (parseArgs + styleText)
 - **Bun and Node.js** -- works on both runtimes
 
@@ -105,12 +110,25 @@ const cmd = defineCommand({
   meta: {
     name: 'serve',
     version: '1.0.0',
-    description: 'Start the server',       // one-line, shown in parent's subcommand list
-    about: 'Start the development server',  // shown at top of this command's help
-    longAbout: 'Extended description...',   // shown with --help (not -h)
-    afterHelp: 'Examples:\n  serve -p 8080',
-    hidden: false,                          // hide from parent help
-    aliases: ['s', 'start'],               // subcommand aliases
+    description: 'Start the server',         // one-line, shown in parent's subcommand list
+    about: 'Start the development server',    // shown at top of this command's help
+    longAbout: 'Extended description...',     // shown with --help (not -h)
+    beforeHelp: 'NOTE: Requires auth.',       // text before help output
+    afterHelp: 'Examples:\n  serve -p 8080',  // text after help output
+    hidden: false,                            // hide from parent help
+    aliases: ['s', 'start'],                  // subcommand aliases
+
+    // Subcommand behavior
+    subcommandRequired: true,                 // error if no subcommand
+    inferSubcommands: true,                   // 'ser' matches 'serve'
+    inferLongArgs: true,                      // '--verb' matches '--verbose'
+    allowExternalSubcommands: true,           // accept undefined subcommands
+    subcommandNegatesReqs: true,              // subcommand waives parent required args
+    argsConflictsWithSubcommands: true,       // args and subcommands mutually exclusive
+    argRequiredElseHelp: true,                // show help if no args provided
+
+    // Help customization
+    helpTemplate: '{name} v{version}\n{usage}\n{options}',
   },
   args: { /* ... */ },
   subCommands: { /* ... */ },
@@ -132,12 +150,12 @@ const cmd = defineCommand({
     // String argument
     name: {
       type: 'string',
-      short: 'n',            // -n
-      long: 'name',          // --name (defaults to key if omitted)
+      short: 'n',              // -n
+      long: 'name',            // --name (defaults to key if omitted)
       description: 'User name',
       required: true,
-      valueName: 'NAME',     // shown in help: --name <NAME>
-      env: 'TOOL_NAME',      // fallback to $TOOL_NAME
+      valueName: 'NAME',       // shown in help: --name <NAME>
+      env: 'TOOL_NAME',        // fallback to $TOOL_NAME
     },
 
     // Number argument
@@ -196,11 +214,77 @@ const cmd = defineCommand({
       description: 'Log level (default: info when flag present)',
     },
 
-    // Aliases
+    // Aliases (hidden from help)
     config: {
       type: 'string',
-      alias: ['c', 'conf', 'configuration'],
+      alias: ['c', 'conf', 'configuration'],  // hidden from help
       description: 'Config file path',
+    },
+
+    // Visible aliases (shown in help)
+    output: {
+      type: 'string',
+      visibleAlias: ['out', 'o'],  // shown in help output
+      description: 'Output path',
+    },
+
+    // Value delimiter (--tags=a,b,c -> ['a', 'b', 'c'])
+    tags: {
+      type: 'string',
+      valueDelimiter: ',',
+      description: 'Comma-separated tags',
+    },
+
+    // Allow negative numbers (--offset -10)
+    offset: {
+      type: 'number',
+      allowNegativeNumbers: true,
+      description: 'Offset (can be negative)',
+    },
+
+    // Allow hyphen values (--grep -pattern)
+    grep: {
+      type: 'string',
+      allowHyphenValues: true,
+      description: 'Search pattern (can start with -)',
+    },
+
+    // Custom value parser (function)
+    port2: {
+      type: 'string',
+      valueParser: (v) => {
+        const n = parseInt(v, 10);
+        if (n < 1 || n > 65535) throw new Error('port must be 1-65535');
+        return n;
+      },
+      description: 'Port with range validation',
+    },
+
+    // Help heading (group args under custom sections)
+    host: {
+      type: 'string',
+      helpHeading: 'Network',
+      description: 'Server host',
+    },
+
+    // Hide from specific help modes
+    debug: {
+      type: 'boolean',
+      hideShortHelp: true,  // hidden from -h, shown in --help
+      description: 'Debug mode',
+    },
+    internal: {
+      type: 'boolean',
+      hideLongHelp: true,   // hidden from --help, shown in -h
+      description: 'Internal flag',
+    },
+
+    // Hide possible values from help
+    format: {
+      type: 'string',
+      valueParser: ['json', 'yaml', 'toml'],
+      hidePossibleValues: true,
+      description: 'Output format',
     },
   },
 });
@@ -212,23 +296,54 @@ const cmd = defineCommand({
 const cmd = defineCommand({
   meta: { name: 'tool' },
   args: {
+    // Mutual exclusion
     json: {
       type: 'boolean',
-      conflictsWith: ['yaml', 'table'],   // mutually exclusive
+      conflictsWith: ['yaml', 'table'],
     },
     yaml: { type: 'boolean' },
     table: { type: 'boolean' },
 
+    // Exclusive: cannot be used with ANY other arg
+    init: {
+      type: 'boolean',
+      exclusive: true,
+    },
+
+    // Companion requirement
     'tls-cert': {
       type: 'string',
-      requires: ['tls'],                   // must also pass --tls
+      requires: ['tls'],
     },
     tls: { type: 'boolean' },
 
+    // Required unless another arg is present
+    file: {
+      type: 'string',
+      required: true,
+      requiredUnlessPresent: 'stdin',   // or ['stdin', 'generate']
+    },
+    stdin: { type: 'boolean' },
+
+    // Conditionally required
+    output: {
+      type: 'string',
+      requiredIfEq: ['format', 'file'], // required when --format=file
+    },
+    format: { type: 'string' },
+
+    // Conditional default
+    port: {
+      type: 'number',
+      defaultValueIf: ['env', 'prod', 443], // default 443 when --env=prod
+    },
+    env: { type: 'string' },
+
+    // Value count constraint
     files: {
       type: 'string',
       action: 'append',
-      numArgs: { min: 1, max: 10 },       // value count constraint
+      numArgs: { min: 1, max: 10 },
     },
   },
 
@@ -244,13 +359,47 @@ const cmd = defineCommand({
 });
 ```
 
+### Trailing Var Args and Last Positional
+
+```ts
+// trailingVarArg: last positional consumes all remaining args
+const exec = defineCommand({
+  meta: { name: 'exec' },
+  args: {
+    cmd: { type: 'positional', valueName: 'CMD' },
+    rest: { type: 'positional', valueName: 'ARGS', trailingVarArg: true },
+  },
+  run({ args }) {
+    // exec echo hello world
+    // args.cmd = 'echo', args.rest = ['hello', 'world']
+  },
+});
+
+// last: positional only assigned from args after --
+const run = defineCommand({
+  meta: { name: 'run' },
+  args: {
+    verbose: { type: 'boolean' },
+    script: { type: 'positional', valueName: 'SCRIPT', last: true },
+  },
+  run({ args }) {
+    // run --verbose -- myscript.sh
+    // args.script = 'myscript.sh'
+  },
+});
+```
+
 ### Subcommands
 
 ```ts
 const root = defineCommand({
-  meta: { name: 'app', version: '1.0.0' },
+  meta: {
+    name: 'app',
+    version: '1.0.0',
+    inferSubcommands: true,   // 'ser' matches 'serve'
+  },
   args: {
-    verbose: { type: 'boolean', short: 'v', global: true }, // inherited by subcommands
+    verbose: { type: 'boolean', short: 'v', global: true },
   },
   subCommands: {
     serve: defineCommand({
@@ -277,7 +426,23 @@ const root = defineCommand({
 runMain(root);
 // $ app serve -p 8080
 // $ app s -p 8080       (alias)
+// $ app ser -p 8080     (inferred)
 // $ app build --out-dir ./out
+```
+
+### External Subcommands
+
+Accept undefined subcommands and handle them in the parent:
+
+```ts
+const git = defineCommand({
+  meta: { name: 'git', allowExternalSubcommands: true },
+  run({ subCommand, rawArgs }) {
+    // $ git my-plugin arg1 arg2
+    // subCommand = 'my-plugin', rawArgs = ['arg1', 'arg2']
+    console.log(`Running plugin: ${subCommand}`);
+  },
+});
 ```
 
 ### Reusable Argument Groups
@@ -319,20 +484,33 @@ const cmd = defineCommand({
   args: { port: { type: 'number', default: 3000 } },
 
   async setup(ctx) {
-    // Initialize resources
     ctx.data.db = await connectToDatabase();
   },
 
   async run(ctx) {
-    // Main logic
     const db = ctx.data.db as Database;
     await startServer(ctx.args.port, db);
   },
 
   async cleanup(ctx) {
-    // Always runs -- close connections, temp files, etc.
     const db = ctx.data.db as Database;
     await db?.close();
+  },
+});
+```
+
+### Custom Styles
+
+Override the default terminal colors for help and error output:
+
+```ts
+import { runMain } from 'clap-ts';
+
+runMain(rootCommand, {
+  styles: {
+    heading: (s) => `\x1b[35m${s}\x1b[0m`,  // magenta headings
+    flag: (s) => `\x1b[36m${s}\x1b[0m`,      // cyan flags
+    command: (s) => `\x1b[1m${s}\x1b[0m`,    // bold commands
   },
 });
 ```
@@ -344,14 +522,13 @@ Entry point for CLI applications. Handles argv parsing, subcommand resolution, v
 ```ts
 import { runMain } from 'clap-ts';
 
-// Basic usage
 runMain(rootCommand);
 
-// With options
 runMain(rootCommand, {
   argv: ['serve', '--port', '8080'],  // override argv (for testing)
   exit: false,                         // don't call process.exit (for testing)
   showHelpOnEmpty: true,               // show help when no args (default: true)
+  styles: { /* custom styles */ },     // override terminal colors
 });
 ```
 
@@ -370,12 +547,16 @@ const command = defineCommand({
 // Parse without validation
 const result = parseArgs(['--port', '8080'], command);
 // result.args, result.positionals, result.rest, result.unknown
+// result.explicitlySet -- Set of arg keys that were explicitly provided
 
 // Validate separately
 validate(result, command); // throws CliParseError on failure
 
 // Render help text
 const helpText = renderHelp(command);
+
+// Render short help (-h style, hides hideShortHelp args)
+const shortHelp = renderHelp(command, undefined, true);
 ```
 
 ## Value Precedence
@@ -384,7 +565,8 @@ Arguments are resolved in this order (highest wins):
 
 1. **CLI flags** -- `--port 8080`
 2. **Environment variables** -- `PORT=8080` (when `env: 'PORT'` is set)
-3. **Default values** -- `default: 3000`
+3. **Conditional defaults** -- `defaultValueIf: ['env', 'prod', 443]`
+4. **Static defaults** -- `default: 3000`
 
 ## Error Messages
 
@@ -442,9 +624,36 @@ Options:
   -h, --help             Print help
   -V, --version          Print version
 
+Network:
+      --host <STRING>    Server host
+      --proxy <STRING>   Proxy URL
+
 Examples:
   my-tool -n World serve -p 8080
 ```
+
+### Help Template
+
+Use `helpTemplate` for full control over help layout:
+
+```ts
+const cmd = defineCommand({
+  meta: {
+    name: 'tool',
+    version: '1.0.0',
+    helpTemplate: `{before-help}{name} v{version}
+
+{usage}
+
+{all-args}
+{commands}
+{after-help}`,
+  },
+  // ...
+});
+```
+
+Placeholders: `{name}`, `{version}`, `{about}`, `{usage}`, `{all-args}`, `{arguments}`, `{options}`, `{commands}`, `{before-help}`, `{after-help}`
 
 ## Exit Codes
 
@@ -456,64 +665,58 @@ Examples:
 
 ## Performance
 
-clap-ts is built for performance. Core parsing delegates to the native `node:util parseArgs` and adds a thin layer for type coercion, env fallback, and validation.
+clap-ts is built for performance. Core parsing delegates to the native `node:util parseArgs` and adds a thin layer for type coercion, env fallback, and validation. Flag lookup uses precomputed `Map`s for O(1) resolution. All new feature fields short-circuit on `undefined` -- zero overhead when unused.
 
-Typical parsing times (measured with `bun bench`):
+Benchmarks on Apple M3 Pro (Bun 1.3):
 
 | Scenario | Time |
 |----------|------|
-| Minimal (no args) | ~1.8us |
-| Simple (5 flags) | ~12us |
-| Complex (22 flags) | ~18us |
-| Subcommand detection | ~13us |
-| Full pipeline (parse + validate) | ~31us |
+| Minimal (no args) | ~1.7us |
+| Simple (5 flags) | ~11us |
+| Complex (22 flags) | ~16us |
+| Subcommand detection | ~12us |
+| Full pipeline (parse + validate) | ~26us |
 
 To run benchmarks yourself:
 
 ```bash
-bun add -d mitata
 bun run bench/parse.bench.ts
 ```
 
 ## Comparison with Rust clap
 
-clap-ts implements the core feature set of Rust's clap:
-
 | Feature | clap (Rust) | clap-ts |
 |---------|------------|---------|
 | Boolean/string/number args | Yes | Yes |
 | Short and long flags | Yes | Yes |
-| Flag aliases | Yes | Yes |
+| Flag aliases (hidden + visible) | Yes | Yes |
 | Subcommands with aliases | Yes | Yes |
 | Nested subcommands | Yes | Yes |
 | Global args | Yes | Yes |
 | Required args | Yes | Yes |
 | Default values | Yes | Yes |
+| Conditional defaults (defaultValueIf) | Yes | Yes |
 | Env var fallback | Yes | Yes |
 | conflictsWith | Yes | Yes |
 | requires | Yes | Yes |
+| exclusive | Yes | Yes |
+| requiredUnlessPresent | Yes | Yes |
+| requiredIfEq | Yes | Yes |
 | Argument groups | Yes | Yes |
 | Enum values (valueParser) | Yes | Yes |
+| Custom value parsers (function) | Yes | Yes |
 | numArgs (min/max) | Yes | Yes |
+| valueDelimiter | Yes | Yes |
 | append action | Yes | Yes |
 | count action | Yes | Yes |
 | Boolean negation (--no-X) | Yes | Yes |
 | Positional args | Yes | Yes |
-| -- rest separator | Yes | Yes |
-| Typo suggestions | Yes | Yes |
-| Colored help output | Yes | Yes |
-| Hidden args/commands | Yes | Yes |
-| Type-safe parsed args | derive macro | generics |
-| Custom value parsers | Yes | Yes |
-| exclusive arg | Yes | Yes |
-| requiredUnlessPresent | Yes | Yes |
-| requiredIfEq | Yes | Yes |
-| defaultValueIf | Yes | Yes |
-| allowHyphenValues | Yes | Yes |
-| allowNegativeNumbers | Yes | Yes |
-| valueDelimiter | Yes | Yes |
 | trailingVarArg | Yes | Yes |
 | last (positional after --) | Yes | Yes |
+| -- rest separator | Yes | Yes |
+| allowHyphenValues | Yes | Yes |
+| allowNegativeNumbers | Yes | Yes |
+| Typo suggestions | Yes | Yes |
 | inferSubcommands | Yes | Yes |
 | inferLongArgs | Yes | Yes |
 | subcommandRequired | Yes | Yes |
@@ -521,19 +724,19 @@ clap-ts implements the core feature set of Rust's clap:
 | allowExternalSubcommands | Yes | Yes |
 | argsConflictsWithSubcommands | Yes | Yes |
 | argRequiredElseHelp | Yes | Yes |
-| beforeHelp | Yes | Yes |
-| helpHeading (grouping) | Yes | Yes |
+| Colored help output | Yes | Yes |
+| Custom styles | Yes | Yes |
+| beforeHelp / afterHelp | Yes | Yes |
+| helpHeading (option grouping) | Yes | Yes |
 | helpTemplate | Yes | Yes |
 | hideShortHelp / hideLongHelp | Yes | Yes |
 | hidePossibleValues | Yes | Yes |
-| visibleAlias | Yes | Yes |
-| Custom styles | Yes | Yes |
+| Hidden args/commands | Yes | Yes |
+| Type-safe parsed args | derive macro | generics |
 | Shell completions | Yes | Not yet |
 | Man page generation | Yes | Not yet |
 
 ## Roadmap
-
-Features planned for future releases:
 
 - Shell completion generation (bash/zsh/fish)
 - Man page generation

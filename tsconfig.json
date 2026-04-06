@@ -15,7 +15,8 @@
     "noUnusedParameters": false,
     "esModuleInterop": true,
     "resolveJsonModule": true,
-    "noUncheckedIndexedAccess": true
+    "noUncheckedIndexedAccess": true,
+    "types": ["bun"]
   },
   "include": ["src"],
   "exclude": ["src/__tests__"]
