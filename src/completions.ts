@@ -583,6 +583,60 @@ export function generateCompletions(
   }
 }
 
+// ---- Public API: Auto-inject completions subcommand ----
+
+const VALID_SHELLS: readonly Shell[] = ['bash', 'zsh', 'fish', 'powershell'];
+
+/**
+ * Return a new command with a `completions` subcommand auto-injected.
+ * The subcommand generates shell completion scripts when invoked.
+ *
+ * ```ts
+ * const root = defineCommand({ ... });
+ * runMain(withCompletions(root));
+ * ```
+ *
+ * Then users run:
+ * ```bash
+ * eval "$(my-cli completions bash)"
+ * ```
+ */
+export function withCompletions<T extends CommandDef>(rootCommand: T): T {
+  const completionsCmd: CommandDef = {
+    meta: {
+      name: 'completions',
+      description: 'Generate shell completion script',
+      aliases: ['completion'],
+    },
+    args: {
+      shell: {
+        type: 'positional' as const,
+        valueName: 'SHELL',
+        required: true,
+        description: 'Target shell: bash, zsh, fish, or powershell',
+      },
+    },
+    run({ args }) {
+      const shell = String(args['shell']);
+      if (!VALID_SHELLS.includes(shell as Shell)) {
+        process.stderr.write(
+          `error: invalid shell '${shell}'. Valid options: ${VALID_SHELLS.join(', ')}\n`,
+        );
+        process.exit(2);
+      }
+      process.stdout.write(generateCompletions(rootCommand, shell as Shell));
+    },
+  };
+
+  return {
+    ...rootCommand,
+    subCommands: {
+      ...rootCommand.subCommands,
+      completions: completionsCmd,
+    },
+  };
+}
+
 // ---- Public API: Dynamic Completion ----
 
 /**

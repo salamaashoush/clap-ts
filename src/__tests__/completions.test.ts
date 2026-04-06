@@ -3,8 +3,8 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { generateCompletions, completeEnv } from '../completions.js';
-import { defineCommand } from '../runner.js';
+import { generateCompletions, completeEnv, withCompletions } from '../completions.js';
+import { defineCommand, runMain } from '../runner.js';
 import type { CommandDef } from '../types.js';
 
 // ---- Test Command ----
@@ -384,5 +384,123 @@ describe('completion for simple command (no subcommands)', () => {
     const script = generateCompletions(simpleCmd, 'fish');
     expect(script).toContain('-l name');
     expect(script).not.toContain('__fish_seen_subcommand_from');
+  });
+});
+
+// ---- withCompletions ----
+
+describe('withCompletions', () => {
+  test('injects completions subcommand', () => {
+    const root = defineCommand({
+      meta: { name: 'myapp' },
+      subCommands: {
+        serve: defineCommand({ meta: { name: 'serve' }, run() {} }),
+      },
+    });
+
+    const wrapped = withCompletions(root);
+    expect(wrapped.subCommands).toBeDefined();
+    expect(wrapped.subCommands!['completions']).toBeDefined();
+    expect(wrapped.subCommands!['serve']).toBeDefined();
+  });
+
+  test('completions subcommand outputs bash script', async () => {
+    const root = defineCommand({
+      meta: { name: 'myapp', version: '1.0.0' },
+      args: { verbose: { type: 'boolean', description: 'Verbose' } },
+    });
+
+    let output = '';
+    const originalWrite = process.stdout.write;
+    process.stdout.write = ((chunk: string) => {
+      output += chunk;
+      return true;
+    }) as typeof process.stdout.write;
+
+    try {
+      await runMain(withCompletions(root), { argv: ['completions', 'bash'], exit: false });
+      expect(output).toContain('# bash completion for myapp');
+      expect(output).toContain('complete -o default');
+      expect(output).toContain('--verbose');
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+  });
+
+  test('completions subcommand outputs zsh script', async () => {
+    const root = defineCommand({
+      meta: { name: 'myapp' },
+      args: { port: { type: 'number', short: 'p', description: 'Port' } },
+    });
+
+    let output = '';
+    const originalWrite = process.stdout.write;
+    process.stdout.write = ((chunk: string) => {
+      output += chunk;
+      return true;
+    }) as typeof process.stdout.write;
+
+    try {
+      await runMain(withCompletions(root), { argv: ['completions', 'zsh'], exit: false });
+      expect(output).toContain('#compdef myapp');
+      expect(output).toContain('--port');
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+  });
+
+  test('completions subcommand errors on invalid shell', async () => {
+    const root = defineCommand({ meta: { name: 'myapp' } });
+
+    let errOutput = '';
+    const originalWrite = process.stderr.write;
+    const originalExit = process.exit;
+    let exitCode: number | undefined;
+
+    process.stderr.write = ((chunk: string) => {
+      errOutput += chunk;
+      return true;
+    }) as typeof process.stderr.write;
+    process.exit = ((code: number) => {
+      exitCode = code;
+      throw new Error('exit');
+    }) as typeof process.exit;
+
+    try {
+      await runMain(withCompletions(root), { argv: ['completions', 'invalid'], exit: false });
+    } catch {
+      // expected from mocked process.exit
+    } finally {
+      process.stderr.write = originalWrite;
+      process.exit = originalExit;
+    }
+
+    expect(errOutput).toContain("invalid shell 'invalid'");
+    expect(exitCode).toBe(2);
+  });
+
+  test('preserves existing subcommands', () => {
+    const root = defineCommand({
+      meta: { name: 'myapp' },
+      subCommands: {
+        serve: defineCommand({ meta: { name: 'serve' } }),
+        build: defineCommand({ meta: { name: 'build' } }),
+      },
+    });
+
+    const wrapped = withCompletions(root);
+    expect(Object.keys(wrapped.subCommands!)).toContain('serve');
+    expect(Object.keys(wrapped.subCommands!)).toContain('build');
+    expect(Object.keys(wrapped.subCommands!)).toContain('completions');
+  });
+
+  test('works on command with no existing subcommands', () => {
+    const root = defineCommand({
+      meta: { name: 'myapp' },
+      args: { name: { type: 'string' } },
+    });
+
+    const wrapped = withCompletions(root);
+    expect(wrapped.subCommands!['completions']).toBeDefined();
   });
 });

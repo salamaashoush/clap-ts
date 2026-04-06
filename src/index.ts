@@ -46,4 +46,4 @@ export { renderHelp, renderUsage, showHelp, showVersion, showError } from './hel
 export { defineCommand, defineArgs, defineArg, runCommand, runMain } from './runner.js';
 
 // Shell completions
-export { generateCompletions, completeEnv } from './completions.js';
+export { generateCompletions, withCompletions, completeEnv } from './completions.js';
