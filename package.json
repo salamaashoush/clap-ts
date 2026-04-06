@@ -1,0 +1,56 @@
+{
+  "name": "clap-ts",
+  "version": "0.1.0",
+  "description": "A type-safe CLI argument parser for TypeScript, inspired by Rust's clap crate. Full clap-style parsing, validation, help generation, and subcommand support with zero dependencies.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "bun test",
+    "bench": "bun run bench/parse.bench.ts",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "cli",
+    "clap",
+    "argument-parser",
+    "command-line",
+    "typescript",
+    "type-safe",
+    "subcommands",
+    "arg-parser",
+    "flag-parser",
+    "bun",
+    "node"
+  ],
+  "author": "Salama Ashoush <salamaashoush@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/salamaashoush/clap-ts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/salamaashoush/clap-ts/issues"
+  },
+  "homepage": "https://github.com/salamaashoush/clap-ts#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.8.0"
+  }
+}
