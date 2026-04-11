@@ -473,6 +473,14 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
 
     // Run the command
     await runCommand(effectiveCommand, parseResult.args as ParsedArgs<ArgsDef>, rawArgs);
+
+    // If the command's run() didn't call process.exit() itself, exit cleanly.
+    // This prevents the process from hanging when the caller uses `void runMain()`
+    // instead of `await runMain()` — the unawaited Promise would otherwise keep
+    // the event loop alive due to pending NAPI handles or other resources.
+    if (shouldExit) {
+      process.exit(0);
+    }
   } catch (error) {
     if (error instanceof CliParseError) {
       showError(error.message, rootCommand, undefined, styles);
