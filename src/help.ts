@@ -13,16 +13,37 @@ import { possibleValues } from './parser.js';
 
 // ---- Color Support ----
 
-/** Get terminal width, defaulting to 80 if not available. */
-function getTerminalWidth(): number {
-  if (typeof process.stdout?.columns === 'number' && process.stdout.columns > 0) {
-    return process.stdout.columns;
+/** Get terminal width, honouring termWidth and maxTermWidth, defaulting to 80. */
+function getTerminalWidth(meta: CommandMeta): number {
+  if (meta.termWidth !== undefined && meta.termWidth > 0) {
+    return meta.termWidth;
   }
-  return 80;
+  let width = 80;
+  if (typeof process.stdout?.columns === 'number' && process.stdout.columns > 0) {
+    width = process.stdout.columns;
+  }
+  if (meta.maxTermWidth !== undefined && meta.maxTermWidth > 0) {
+    width = Math.min(width, meta.maxTermWidth);
+  }
+  return width;
 }
 
 /** Create style functions, merging optional user overrides. */
-function createStyles(overrides?: Partial<StylesDef>): StylesDef {
+const NO_STYLE: StylesDef = {
+  bold: (s) => s,
+  yellow: (s) => s,
+  green: (s) => s,
+  cyan: (s) => s,
+  heading: (s) => s,
+  flag: (s) => s,
+  value: (s) => s,
+  command: (s) => s,
+};
+
+function createStyles(overrides?: Partial<StylesDef>, disabled = false): StylesDef {
+  if (disabled) {
+    return overrides ? { ...NO_STYLE, ...overrides } : NO_STYLE;
+  }
   const defaults: StylesDef = {
     bold: (s) => styleText('bold', s),
     yellow: (s) => styleText('yellow', s),
@@ -43,7 +64,8 @@ function createStyles(overrides?: Partial<StylesDef>): StylesDef {
 
 /** Wrap text to fit within a given width, preserving leading indent. */
 function wrapText(text: string, maxWidth: number, indent: number): string {
-  if (text.length + indent <= maxWidth) {
+  const available = Math.max(MIN_DESC_WIDTH, maxWidth - indent);
+  if (text.length <= available) {
     return text;
   }
 
@@ -55,7 +77,7 @@ function wrapText(text: string, maxWidth: number, indent: number): string {
   for (const word of words) {
     if (currentLine.length === 0) {
       currentLine = word;
-    } else if (currentLine.length + 1 + word.length + indent <= maxWidth) {
+    } else if (currentLine.length + 1 + word.length <= available) {
       currentLine += ` ${word}`;
     } else {
       lines.push(currentLine);
@@ -187,7 +209,7 @@ function appendUsageParts(usageParts: string[], command: CommandDef): void {
     }
   }
   if (hasSubcommands) {
-    usageParts.push('[COMMAND]');
+    usageParts.push(`[${command.meta.subcommandValueName ?? 'COMMAND'}]`);
   }
 }
 
@@ -204,6 +226,9 @@ function isArgHiddenForMode(def: ArgDef, isShortHelp: boolean): boolean {
   }
   return false;
 }
+
+/** Below this many columns beside a flag, help drops to next-line layout. */
+const MIN_DESC_WIDTH = 20;
 
 // ---- Entry type for aligned rendering ----
 
@@ -230,15 +255,21 @@ function renderAlignedEntries(
   const maxLen = inline.length > 0 ? Math.max(...inline.map((e) => e.rawLen)) : 0;
   const descIndent = maxLen + 4;
 
+  // A narrow terminal leaves too little room beside the flag to wrap into, so
+  // the whole section drops to next-line help rather than overflowing.
+  const forceNextLine = termWidth - (descIndent + 2) < MIN_DESC_WIDTH;
+
   for (const entry of entries) {
-    if (entry.nextLine) {
+    if (entry.nextLine || forceNextLine) {
       lines.push(entry.label);
       if (entry.desc) {
-        lines.push(`      ${wrapText(entry.desc, termWidth, 8)}`);
+        lines.push(`      ${wrapText(entry.desc, termWidth, 6)}`);
       }
-    } else {
+    } else if (entry.desc) {
       const padding = ' '.repeat(Math.max(2, descIndent - entry.rawLen));
-      lines.push(`${entry.label}${padding}${wrapText(entry.desc, termWidth, descIndent + 2)}`);
+      lines.push(`${entry.label}${padding}${wrapText(entry.desc, termWidth, descIndent)}`);
+    } else {
+      lines.push(entry.label);
     }
     if (entry.detail) {
       for (const line of entry.detail) {
@@ -310,6 +341,7 @@ function renderHelpTemplate(
   return template
     .replaceAll('{name}', meta.name)
     .replaceAll('{version}', meta.version ?? '')
+    .replaceAll('{author}', meta.author ?? '')
     .replaceAll('{about}', meta.about ?? meta.description ?? '')
     .replaceAll('{usage}', usageStr)
     .replaceAll('{all-args}', [argumentsStr, optionsStr].filter(Boolean).join('\n'))
@@ -418,12 +450,18 @@ function renderOptionsSection(
 
     // Add built-in --help and --version to the default "Options" group
     if (heading === defaultHeading) {
-      const helpFlag = `  ${styles.flag('-h')}, ${styles.flag('--help')}`;
-      entries.push({ label: helpFlag, rawLen: 14, desc: 'Print help' });
+      if (!meta.disableHelpFlag) {
+        const helpFlag = `  ${styles.flag('-h')}, ${styles.flag('--help')}`;
+        entries.push({ label: helpFlag, rawLen: '  -h, --help'.length, desc: 'Print help' });
+      }
 
-      if (meta.version) {
+      if (meta.version && !meta.disableVersionFlag) {
         const versionFlag = `  ${styles.flag('-V')}, ${styles.flag('--version')}`;
-        entries.push({ label: versionFlag, rawLen: 17, desc: 'Print version' });
+        entries.push({
+          label: versionFlag,
+          rawLen: '  -V, --version'.length,
+          desc: 'Print version',
+        });
       }
     }
 
@@ -445,8 +483,13 @@ export function renderHelp(
   styleOverrides?: Partial<StylesDef>,
 ): string {
   const { meta } = command;
-  const styles = createStyles(styleOverrides);
-  const termWidth = getTerminalWidth();
+
+  if (meta.overrideHelp !== undefined) {
+    return meta.overrideHelp.endsWith('\n') ? meta.overrideHelp : `${meta.overrideHelp}\n`;
+  }
+
+  const styles = createStyles(styleOverrides, meta.disableColoredHelp === true);
+  const termWidth = getTerminalWidth(meta);
   const fullName = parentNames ? [...parentNames, meta.name].join(' ') : meta.name;
 
   // Custom template override
@@ -457,8 +500,9 @@ export function renderHelp(
   const lines: string[] = [];
 
   // Before help text
-  if (meta.beforeHelp) {
-    lines.push(meta.beforeHelp);
+  const beforeHelp = (!isShortHelp && meta.beforeLongHelp) || meta.beforeHelp;
+  if (beforeHelp) {
+    lines.push(beforeHelp);
     lines.push('');
   }
 
@@ -480,9 +524,13 @@ export function renderHelp(
   lines.push('');
 
   // Usage line
-  const usageParts = [styles.heading('Usage:'), styles.command(fullName)];
-  appendUsageParts(usageParts, command);
-  lines.push(usageParts.join(' '));
+  if (meta.overrideUsage !== undefined) {
+    lines.push(`${styles.heading('Usage:')} ${meta.overrideUsage}`);
+  } else {
+    const usageParts = [styles.heading('Usage:'), styles.command(fullName)];
+    appendUsageParts(usageParts, command);
+    lines.push(usageParts.join(' '));
+  }
 
   // Positional arguments
   const argsDef = command.args ?? {};
@@ -505,9 +553,10 @@ export function renderHelp(
   }
 
   // After help
-  if (meta.afterHelp) {
+  const afterHelp = (!isShortHelp && meta.afterLongHelp) || meta.afterHelp;
+  if (afterHelp) {
     lines.push('');
-    lines.push(meta.afterHelp);
+    lines.push(afterHelp);
   }
 
   lines.push('');
@@ -523,12 +572,21 @@ function renderSubcommandSection(
   fullName: string,
 ): void {
   lines.push('');
-  lines.push(styles.heading('Commands:'));
+  lines.push(styles.heading(`${command.meta.subcommandHelpHeading ?? 'Commands'}:`));
 
   const subEntries: HelpEntry[] = [];
   const rendered = new Set<string>();
 
-  for (const [name, def] of Object.entries(command.subCommands!)) {
+  const subs = Object.entries(command.subCommands!);
+  if (subs.some(([, def]) => def.meta.displayOrder !== undefined)) {
+    subs.sort(
+      (a, b) =>
+        (a[1].meta.displayOrder ?? Number.MAX_SAFE_INTEGER) -
+        (b[1].meta.displayOrder ?? Number.MAX_SAFE_INTEGER),
+    );
+  }
+
+  for (const [name, def] of subs) {
     if (def.meta.hidden) {
       continue;
     }
@@ -537,12 +595,19 @@ function renderSubcommandSection(
     }
     rendered.add(name);
 
+    // Visible aliases and any flag form share the parenthesised suffix.
+    const extras: string[] = [...(def.meta.aliases ?? [])];
+    if (def.meta.shortFlag !== undefined) {
+      extras.push(`-${def.meta.shortFlag}`);
+    }
+    if (def.meta.longFlag !== undefined) {
+      extras.push(`--${def.meta.longFlag}`);
+    }
+
     let label: string;
     let rawLen: number;
-
-    const { aliases } = def.meta;
-    if (aliases && aliases.length > 0) {
-      const aliasStr = aliases.join(', ');
+    if (extras.length > 0) {
+      const aliasStr = extras.join(', ');
       label = `  ${styles.command(name)} (${aliasStr})`;
       rawLen = name.length + aliasStr.length + 5;
     } else {
@@ -550,8 +615,15 @@ function renderSubcommandSection(
       rawLen = name.length + 2;
     }
 
-    const desc = def.meta.description ?? '';
-    subEntries.push({ label, rawLen, desc });
+    subEntries.push({ label, rawLen, desc: def.meta.description ?? '' });
+  }
+
+  if (!command.meta.disableHelpSubcommand) {
+    subEntries.push({
+      label: `  ${styles.command('help')}`,
+      rawLen: 6,
+      desc: 'Print this message or the help of the given subcommand(s)',
+    });
   }
 
   renderAlignedEntries(subEntries, termWidth, lines);
@@ -571,9 +643,13 @@ export function renderUsage(
   styleOverrides?: Partial<StylesDef>,
 ): string {
   const { meta } = command;
-  const styles = createStyles(styleOverrides);
-  const fullName = parentNames ? [...parentNames, meta.name].join(' ') : meta.name;
+  const styles = createStyles(styleOverrides, meta.disableColoredHelp === true);
 
+  if (meta.overrideUsage !== undefined) {
+    return `${styles.heading('Usage:')} ${meta.overrideUsage}`;
+  }
+
+  const fullName = parentNames ? [...parentNames, meta.name].join(' ') : meta.name;
   const usageParts = [styles.heading('Usage:'), styles.command(fullName)];
   appendUsageParts(usageParts, command);
 
@@ -596,8 +672,8 @@ export function showHelp(
 /**
  * Print version to stdout.
  */
-export function showVersion(meta: CommandMeta): void {
-  const version = meta.version ?? '0.0.0';
+export function showVersion(meta: CommandMeta, isShort = false): void {
+  const version = (!isShort && meta.longVersion) || meta.version || '0.0.0';
   process.stdout.write(`${meta.name} ${version}\n`);
 }
 

@@ -38,15 +38,18 @@ function kebabToCamel(s: string): string {
   return s.replaceAll(/-([a-z])/g, (_, c: string) => c.toUpperCase());
 }
 
-/** Get the raw argv slice (after the binary/script path). */
-export function getRawArgs(argv?: readonly string[]): string[] {
+/**
+ * Get the raw argv slice (after the binary/script path). With `noBinaryName`
+ * the source is taken as-is, matching clap's Command::no_binary_name.
+ */
+export function getRawArgs(argv?: readonly string[], noBinaryName = false): string[] {
   if (argv) {
     return [...argv];
   }
   // Bun.argv includes [bun, script, ...args], same as process.argv
   const source =
     globalThis.Bun === undefined ? process.argv : (globalThis.Bun as { argv: string[] }).argv;
-  return source.slice(2);
+  return noBinaryName ? [...source] : source.slice(2);
 }
 
 function readEnv(name: string): string | undefined {
@@ -112,6 +115,8 @@ interface ArgSpec {
   readonly max: number;
   /** camelCase form of `key`, precomputed so parsing never re-runs the regex. */
   readonly camel: string;
+  /** Whether a second occurrence of this arg should be rejected. */
+  readonly repeatIsError: boolean;
   /** Built-in flag this spec stands for, if any. */
   readonly builtin?: 'help' | 'version';
 }
@@ -125,12 +130,22 @@ interface CommandSpec {
   readonly longs: Map<string, LongEntry>;
   readonly shorts: Map<string, ArgSpec>;
   readonly positionals: readonly ArgSpec[];
+  /** Count of positionals fed from argv rather than from after `--`. */
+  readonly indexedPositionals: number;
   /** Every declared arg, in declaration order, for the fallback and key passes. */
   readonly all: readonly ArgSpec[];
   /** Subcommand name or alias -> canonical name. Undefined when there are none. */
   readonly subcommands: Map<string, string> | undefined;
   readonly inferSubcommands: boolean;
   readonly allowExternal: boolean;
+  /** Long or short flag -> canonical subcommand name, for `pacman -S` style. */
+  readonly subcommandFlags: Map<string, string> | undefined;
+  readonly subcommandPrecedence: boolean;
+  readonly allowMissingPositional: boolean;
+  readonly argsOverrideSelf: boolean;
+  /** Whether any arg declares overridesWith, so occurrence order must be kept. */
+  readonly hasOverrides: boolean;
+  readonly cmdAllowHyphen: boolean;
   /** Any arg accepts negative numbers, so `-5` may be a value rather than a flag. */
   readonly allowsNegative: boolean;
   readonly inferLong: boolean;
@@ -148,16 +163,18 @@ function valueCounts(def: ArgDef): { min: number; max: number } {
   return { min: 1, max: 1 };
 }
 
-function makeSpec(key: string, def: ArgDef): ArgSpec {
+function makeSpec(key: string, def: ArgDef, argsOverrideSelf: boolean): ArgSpec {
   const { min, max } = valueCounts(def);
+  const isAppend = def.action === 'append';
   return {
     key,
     def,
     long: def.long ?? key,
     camel: kebabToCamel(key),
+    repeatIsError: !isAppend && !argsOverrideSelf && def.overridesWith === undefined,
     isBool: def.type === 'boolean' && def.action !== 'count',
     isCount: def.action === 'count',
-    isAppend: def.action === 'append',
+    isAppend,
     min,
     max,
   };
@@ -189,14 +206,24 @@ function buildSpec(command: CommandDef): CommandSpec {
   const all: ArgSpec[] = [];
   let allowsNegative = false;
 
+  const cmdAllowHyphen = command.meta.allowHyphenValues === true;
+  const argsOverrideSelf = command.meta.argsOverrideSelf === true;
+  let hasOverrides = false;
+  if (command.meta.allowNegativeNumbers) {
+    allowsNegative = true;
+  }
+
   for (const key of Object.keys(argsDef)) {
     const def = argsDef[key]!;
 
     if (def.allowNegativeNumbers) {
       allowsNegative = true;
     }
+    if (def.overridesWith !== undefined) {
+      hasOverrides = true;
+    }
 
-    const spec = makeSpec(key, def);
+    const spec = makeSpec(key, def, argsOverrideSelf);
     all.push(spec);
 
     if (def.type === 'positional') {
@@ -218,23 +245,31 @@ function buildSpec(command: CommandDef): CommandSpec {
   // Built-in flags never displace a user-defined arg of the same name.
   const helpSpec: ArgSpec = {
     key: 'help', def: { type: 'boolean' }, long: 'help', camel: 'help',
+    repeatIsError: false,
     isBool: true, isCount: false, isAppend: false, min: 0, max: 0, builtin: 'help',
   };
   const versionSpec: ArgSpec = {
     key: 'version', def: { type: 'boolean' }, long: 'version', camel: 'version',
+    repeatIsError: false,
     isBool: true, isCount: false, isAppend: false, min: 0, max: 0, builtin: 'version',
   };
-  if (!longs.has('help')) {
-    longs.set('help', { spec: helpSpec, negated: false });
+  if (command.meta.disableHelpFlag !== true) {
+    if (!longs.has('help')) {
+      longs.set('help', { spec: helpSpec, negated: false });
+    }
+    if (!shorts.has('h')) {
+      shorts.set('h', helpSpec);
+    }
   }
-  if (!longs.has('version')) {
-    longs.set('version', { spec: versionSpec, negated: false });
-  }
-  if (!shorts.has('h')) {
-    shorts.set('h', helpSpec);
-  }
-  if (!shorts.has('V')) {
-    shorts.set('V', versionSpec);
+  // clap only offers --version where a version exists, either on this command
+  // or propagated down from an ancestor.
+  if (command.meta.disableVersionFlag !== true && command.meta.version !== undefined) {
+    if (!longs.has('version')) {
+      longs.set('version', { spec: versionSpec, negated: false });
+    }
+    if (!shorts.has('V')) {
+      shorts.set('V', versionSpec);
+    }
   }
 
   // An explicit index overrides declaration order; unindexed positionals keep
@@ -244,14 +279,25 @@ function buildSpec(command: CommandDef): CommandSpec {
   }
 
   let subcommands: Map<string, string> | undefined;
+  let subcommandFlags: Map<string, string> | undefined;
   if (command.subCommands) {
     subcommands = new Map();
     for (const name of Object.keys(command.subCommands)) {
       subcommands.set(name, name);
-      const { aliases } = command.subCommands[name]!.meta;
-      if (aliases) {
-        for (const alias of aliases) {
-          subcommands.set(alias, name);
+      const subMeta = command.subCommands[name]!.meta;
+      for (const alias of subMeta.aliases ?? []) {
+        subcommands.set(alias, name);
+      }
+      for (const alias of subMeta.hiddenAliases ?? []) {
+        subcommands.set(alias, name);
+      }
+      if (subMeta.shortFlag !== undefined || subMeta.longFlag !== undefined) {
+        subcommandFlags ??= new Map();
+        if (subMeta.shortFlag !== undefined) {
+          subcommandFlags.set(`-${subMeta.shortFlag}`, name);
+        }
+        if (subMeta.longFlag !== undefined) {
+          subcommandFlags.set(`--${subMeta.longFlag}`, name);
         }
       }
     }
@@ -261,10 +307,17 @@ function buildSpec(command: CommandDef): CommandSpec {
     longs,
     shorts,
     positionals,
+    indexedPositionals: positionals.reduce((n, spec) => (spec.def.last ? n : n + 1), 0),
     all,
     subcommands,
     inferSubcommands: command.meta.inferSubcommands === true,
     allowExternal: command.meta.allowExternalSubcommands === true,
+    subcommandFlags,
+    subcommandPrecedence: command.meta.subcommandPrecedenceOverArg === true,
+    allowMissingPositional: command.meta.allowMissingPositional === true,
+    argsOverrideSelf,
+    hasOverrides,
+    cmdAllowHyphen,
     allowsNegative,
     inferLong: command.meta.inferLongArgs === true,
   };
@@ -331,8 +384,11 @@ function displayName(spec: ArgSpec): string {
 interface ParseState {
   readonly result: Record<string, string | number | boolean | string[]>;
   readonly explicitlySet: Set<string>;
-  /** Arg key -> sequence number of its last explicit occurrence, for overridesWith. */
-  readonly order: Map<string, number>;
+  /**
+   * Arg key -> sequence number of its last explicit occurrence. Only built when
+   * some arg declares overridesWith, so the common parse allocates no Map.
+   */
+  order: Map<string, number> | undefined;
   seq: number;
   readonly unknown: string[];
   readonly positionals: string[];
@@ -340,6 +396,7 @@ interface ParseState {
   helpRequested: boolean;
   helpIsShort: boolean;
   versionRequested: boolean;
+  versionIsShort: boolean;
   subCommand?: string;
   subCommandIsExternal: boolean;
   subCommandArgs: readonly string[];
@@ -348,11 +405,11 @@ interface ParseState {
 /** Record that an arg was explicitly given, keeping the occurrence order. */
 function markSet(state: ParseState, key: string): void {
   state.explicitlySet.add(key);
-  state.order.set(key, state.seq++);
+  state.order?.set(key, state.seq++);
 }
 
 /** Whether a token can serve as a value for this arg rather than starting a new flag. */
-function isValueToken(token: string, spec: ArgSpec, allowsNegative: boolean): boolean {
+function isValueToken(token: string, spec: ArgSpec, cmdSpec: CommandSpec): boolean {
   if (token.length === 0 || token.charCodeAt(0) !== HYPHEN) {
     return true;
   }
@@ -362,11 +419,11 @@ function isValueToken(token: string, spec: ArgSpec, allowsNegative: boolean): bo
   if (token === '--') {
     return false;
   }
-  if (spec.def.allowHyphenValues) {
+  if (spec.def.allowHyphenValues || cmdSpec.cmdAllowHyphen) {
     return true;
   }
   return (
-    (spec.def.allowNegativeNumbers || allowsNegative) && NEGATIVE_NUMBER.test(token)
+    (spec.def.allowNegativeNumbers || cmdSpec.allowsNegative) && NEGATIVE_NUMBER.test(token)
   );
 }
 
@@ -390,8 +447,21 @@ function applyFlagOnly(spec: ArgSpec, negated: boolean, state: ParseState): void
 }
 
 /** Store one or more parsed values for an arg, honouring the append action. */
-function applyValues(spec: ArgSpec, values: string[], state: ParseState): void {
+function applyValues(
+  spec: ArgSpec,
+  values: string[],
+  state: ParseState,
+  cmdSpec: CommandSpec,
+): void {
   const name = displayName(spec);
+
+  // A second occurrence of a single-value arg is an error in clap unless the
+  // command opted into argsOverrideSelf. Reading result is cheaper than the
+  // Set, and defaults have not been applied yet, so a value here means a
+  // previous occurrence.
+  if (spec.repeatIsError && state.result[spec.key] !== undefined) {
+    throw new CliParseError(`the argument '${name}' cannot be used multiple times`);
+  }
 
   if (spec.isAppend) {
     const previous = state.result[spec.key];
@@ -443,7 +513,14 @@ function consumeValues(
       i++;
       break;
     }
-    if (!isValueToken(token, spec, cmdSpec.allowsNegative)) {
+    if (!isValueToken(token, spec, cmdSpec)) {
+      break;
+    }
+    if (
+      cmdSpec.subcommandPrecedence &&
+      values.length >= spec.min &&
+      resolveSubcommand(cmdSpec, token) !== undefined
+    ) {
       break;
     }
     values.push(token);
@@ -465,7 +542,7 @@ function consumeValues(
   if (values.length === 0) {
     applyMissingValue(spec, state);
   } else {
-    applyValues(spec, values, state);
+    applyValues(spec, values, state, cmdSpec);
   }
   return i - 1;
 }
@@ -551,7 +628,7 @@ function handleLong(
       markSet(state, spec.key);
       return i;
     }
-    applyValues(spec, [inline], state);
+    applyValues(spec, [inline], state, cmdSpec);
     return i;
   }
 
@@ -593,6 +670,11 @@ function handleShort(
       state.helpIsShort = true;
       continue;
     }
+    if (spec.builtin === 'version') {
+      state.versionRequested = true;
+      state.versionIsShort = true;
+      continue;
+    }
     if (spec.max === 0) {
       applyFlagOnly(spec, false, state);
       continue;
@@ -602,7 +684,7 @@ function handleShort(
     if (c + 1 < token.length) {
       // clap strips a single leading '=' so `-o=v` and `-ov` agree.
       const attached = token.charCodeAt(c + 1) === 61 ? token.slice(c + 2) : token.slice(c + 1);
-      applyValues(spec, [attached], state);
+      applyValues(spec, [attached], state, cmdSpec);
       return i;
     }
     if (spec.def.requireEquals) {
@@ -624,8 +706,22 @@ function handleShort(
 
 function assignPositionals(cmdSpec: CommandSpec, state: ParseState): void {
   let index = 0;
+  // Definitions still waiting for a value, so a leading optional one can be
+  // skipped when there are not enough values to go round.
+  let remainingDefs = cmdSpec.indexedPositionals;
 
   for (const spec of cmdSpec.positionals) {
+    if (!spec.def.last) {
+      remainingDefs--;
+      if (
+        cmdSpec.allowMissingPositional &&
+        !spec.def.required &&
+        state.positionals.length - index <= remainingDefs
+      ) {
+        continue;
+      }
+    }
+
     if (spec.def.last) {
       // `last` positionals are only fed from tokens after `--`.
       if (state.rest.length > 0) {
@@ -670,12 +766,16 @@ function assignPositionals(cmdSpec: CommandSpec, state: ParseState): void {
  * occurrences take part, so an env or default value is never overridden.
  */
 function applyOverrides(cmdSpec: CommandSpec, state: ParseState): void {
+  const order = state.order;
+  if (order === undefined) {
+    return;
+  }
   for (const spec of cmdSpec.all) {
     const targets = spec.def.overridesWith;
     if (targets === undefined || !state.explicitlySet.has(spec.key)) {
       continue;
     }
-    const mine = state.order.get(spec.key);
+    const mine = order.get(spec.key);
     if (mine === undefined) {
       continue;
     }
@@ -683,13 +783,13 @@ function applyOverrides(cmdSpec: CommandSpec, state: ParseState): void {
       if (target === spec.key) {
         continue;
       }
-      const theirs = state.order.get(target);
+      const theirs = order.get(target);
       if (theirs === undefined || theirs > mine) {
         continue;
       }
       delete state.result[target];
       state.explicitlySet.delete(target);
-      state.order.delete(target);
+      order.delete(target);
     }
   }
 }
@@ -776,7 +876,7 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
   const state: ParseState = {
     result: {},
     explicitlySet: new Set<string>(),
-    order: new Map<string, number>(),
+    order: cmdSpec.hasOverrides ? new Map<string, number>() : undefined,
     seq: 0,
     unknown: [],
     positionals: [],
@@ -784,6 +884,7 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
     helpRequested: false,
     helpIsShort: false,
     versionRequested: false,
+    versionIsShort: false,
     subCommandIsExternal: false,
     subCommandArgs: [],
   };
@@ -800,6 +901,12 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
     }
 
     if (token.length > 1 && token.charCodeAt(0) === HYPHEN) {
+      const flagSub = cmdSpec.subcommandFlags?.get(token);
+      if (flagSub !== undefined) {
+        state.subCommand = flagSub;
+        state.subCommandArgs = rawArgs.slice(i + 1);
+        break;
+      }
       if (token.charCodeAt(1) === HYPHEN) {
         i = handleLong(token, rawArgs, i, cmdSpec, state);
         continue;
@@ -861,6 +968,7 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
     helpRequested: state.helpRequested,
     helpIsShort: state.helpIsShort,
     versionRequested: state.versionRequested,
+    versionIsShort: state.versionIsShort,
     unknown: state.unknown,
     explicitlySet: state.explicitlySet,
   };

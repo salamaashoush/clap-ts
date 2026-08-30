@@ -204,6 +204,12 @@ export interface CommandMeta {
   readonly name: string;
   /** Version string (shown with --version). */
   readonly version?: string;
+  /** Longer version text, shown with --version where -V shows `version`. */
+  readonly longVersion?: string;
+  /** Give subcommands this command's version, as clap's propagate_version does. */
+  readonly propagateVersion?: boolean;
+  /** Author line, available to help templates as {author}. */
+  readonly author?: string;
   /** Short description (one line, shown in parent's subcommand list). */
   readonly description?: string;
   /** Longer "about" text (shown at top of this command's help). */
@@ -214,10 +220,22 @@ export interface CommandMeta {
   readonly beforeHelp?: string;
   /** Text appended after the help output. */
   readonly afterHelp?: string;
+  /** Text prepended before long help only (--help, not -h). */
+  readonly beforeLongHelp?: string;
+  /** Text appended after long help only (--help, not -h). */
+  readonly afterLongHelp?: string;
   /** Hide this command from parent's help subcommand list. */
   readonly hidden?: boolean;
   /** Visible aliases shown next to the command name in help. */
   readonly aliases?: readonly string[];
+  /** Aliases that work but stay out of help. */
+  readonly hiddenAliases?: readonly string[];
+  /** Invoke this subcommand with a short flag, as in `pacman -S`. */
+  readonly shortFlag?: string;
+  /** Invoke this subcommand with a long flag, as in `pacman --sync`. */
+  readonly longFlag?: string;
+  /** Sort key among sibling subcommands in help; lower comes first. */
+  readonly displayOrder?: number;
   /** Require a subcommand to be provided. */
   readonly subcommandRequired?: boolean;
   /** Accept partial subcommand names (e.g., 'ser' matches 'serve'). */
@@ -232,9 +250,43 @@ export interface CommandMeta {
   readonly subcommandNegatesReqs?: boolean;
   /** Show help if no arguments are provided (instead of running). */
   readonly argRequiredElseHelp?: boolean;
+  /** Do not add the built-in -h/--help flag. */
+  readonly disableHelpFlag?: boolean;
+  /** Do not add the built-in -V/--version flag. */
+  readonly disableVersionFlag?: boolean;
+  /** Do not add the built-in `help` subcommand. */
+  readonly disableHelpSubcommand?: boolean;
+  /** Render help without colour even on a capable terminal. */
+  readonly disableColoredHelp?: boolean;
+  /** Fixed width for help output, overriding the terminal width. */
+  readonly termWidth?: number;
+  /** Upper bound on the terminal width used for help output. */
+  readonly maxTermWidth?: number;
+  /** Replace the generated usage line. */
+  readonly overrideUsage?: string;
+  /** Replace the whole help output. */
+  readonly overrideHelp?: string;
+  /** Heading for the subcommand list (default "Commands"). */
+  readonly subcommandHelpHeading?: string;
+  /** Placeholder for the subcommand in the usage line (default "COMMAND"). */
+  readonly subcommandValueName?: string;
+  /** Let every arg of this command accept values starting with a hyphen. */
+  readonly allowHyphenValues?: boolean;
+  /** Let every arg of this command accept negative numbers as values. */
+  readonly allowNegativeNumbers?: boolean;
+  /** Allow the first positional to be omitted when later ones are given. */
+  readonly allowMissingPositional?: boolean;
+  /** Repeating a single-value arg replaces it instead of being an error. */
+  readonly argsOverrideSelf?: boolean;
+  /** A subcommand name ends value collection for a multi-value arg. */
+  readonly subcommandPrecedenceOverArg?: boolean;
+  /** Dispatch on the invoked binary name, busybox style. */
+  readonly multicall?: boolean;
+  /** argv holds no binary name, so nothing is stripped from the front. */
+  readonly noBinaryName?: boolean;
   /**
    * Custom help template with placeholders:
-   * {name}, {version}, {about}, {usage}, {all-args}, {arguments},
+   * {name}, {version}, {author}, {about}, {usage}, {all-args}, {arguments},
    * {options}, {commands}, {before-help}, {after-help}
    */
   readonly helpTemplate?: string;
@@ -360,6 +412,8 @@ export interface ParseResult {
   readonly helpIsShort: boolean;
   /** Whether --version / -V was requested. */
   readonly versionRequested: boolean;
+  /** Whether -V (short) was used rather than --version. */
+  readonly versionIsShort: boolean;
   /** Unknown flags that were passed. */
   readonly unknown: readonly string[];
   /** Set of arg keys that were explicitly provided (not defaults or env). */

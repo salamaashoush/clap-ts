@@ -82,11 +82,48 @@ export function defineArg<const T extends ArgDef>(arg: T): T {
  * a command with nothing to inherit is returned untouched so the parser's spec
  * cache still hits.
  */
-function applyGlobals(command: CommandDef, globals: ArgsDef): CommandDef {
+function applyGlobals(
+  command: CommandDef,
+  globals: ArgsDef,
+  propagatedVersion: string | undefined,
+): CommandDef {
+  let hasGlobals = false;
   for (const _key in globals) {
-    return { ...command, args: mergeGlobalArgs(globals, command.args ?? {}) };
+    hasGlobals = true;
+    break;
   }
-  return command;
+  const needsVersion = propagatedVersion !== undefined && command.meta.version === undefined;
+
+  if (!hasGlobals && !needsVersion) {
+    return command;
+  }
+  return {
+    ...command,
+    meta: needsVersion ? { ...command.meta, version: propagatedVersion } : command.meta,
+    args: hasGlobals ? mergeGlobalArgs(globals, command.args ?? {}) : command.args,
+  };
+}
+
+/**
+ * Walk a chain of subcommand names from a command, for `app help sub subsub`.
+ * Returns the deepest command reached and the names of its ancestors.
+ */
+function resolveHelpTarget(
+  root: CommandDef,
+  rootParents: readonly string[],
+  path: readonly string[],
+): { command: CommandDef; parentNames: string[] } {
+  let current = root;
+  const parentNames = [...rootParents];
+  for (const name of path) {
+    const next = current.subCommands?.[name];
+    if (next === undefined) {
+      break;
+    }
+    parentNames.push(current.meta.name);
+    current = next;
+  }
+  return { command: current, parentNames };
 }
 
 // ---- runCommand ----
@@ -212,9 +249,10 @@ function handleVersionRequest(
   effectiveCommand: CommandDef,
   rootCommand: CommandDef,
   shouldExit: boolean,
+  isShort: boolean,
 ): void {
   const versionMeta = effectiveCommand.meta.version ? effectiveCommand.meta : rootCommand.meta;
-  showVersion(versionMeta);
+  showVersion(versionMeta, isShort);
   if (shouldExit) {
     process.exit(0);
   }
@@ -264,11 +302,21 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
   let errorParents: string[] = [];
 
   try {
-    const rawArgs = getRawArgs(opts?.argv);
+    let rawArgs = getRawArgs(opts?.argv, rootCommand.meta.noBinaryName === true);
+
+    // multicall: the name the binary was invoked under selects the subcommand.
+    if (rootCommand.meta.multicall && opts?.argv === undefined) {
+      const invoked = process.argv[1];
+      if (invoked !== undefined) {
+        const base = invoked.slice(invoked.lastIndexOf('/') + 1).replace(/\.[cm]?[jt]s$/, '');
+        rawArgs = [base, ...rawArgs];
+      }
+    }
 
     let command: CommandDef = rootCommand;
     let effectiveCommand: CommandDef = rootCommand;
     let inheritedGlobals: ArgsDef = {};
+    let propagatedVersion: string | undefined;
     let argv: readonly string[] = rawArgs;
     const parentNames: string[] = [];
     let parseResult = parseArgs([], rootCommand);
@@ -279,11 +327,30 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
     // a preceding flag.
     for (;;) {
       inheritedGlobals = mergeGlobalArgs(inheritedGlobals, collectGlobalArgs(command));
-      effectiveCommand = applyGlobals(command, inheritedGlobals);
+      if (command.meta.propagateVersion && command.meta.version !== undefined) {
+        propagatedVersion = command.meta.version;
+      }
+      effectiveCommand = applyGlobals(command, inheritedGlobals, propagatedVersion);
       errorCommand = effectiveCommand;
       errorParents = [...parentNames];
 
       parseResult = parseArgs(argv, effectiveCommand);
+
+      // The built-in `help` subcommand: `app help`, `app help sub sub`.
+      if (
+        parseResult.subCommand === undefined &&
+        command.subCommands !== undefined &&
+        command.meta.disableHelpSubcommand !== true &&
+        parseResult.positionals[0] === 'help'
+      ) {
+        const target = resolveHelpTarget(
+          effectiveCommand,
+          parentNames,
+          parseResult.positionals.slice(1),
+        );
+        handleHelpRequest(target.command, target.parentNames, shouldExit, false, styles);
+        return;
+      }
 
       if (
         parseResult.subCommand === undefined ||
@@ -352,7 +419,7 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
 
     // Handle --version
     if (parseResult.versionRequested) {
-      handleVersionRequest(effectiveCommand, rootCommand, shouldExit);
+      handleVersionRequest(effectiveCommand, rootCommand, shouldExit, parseResult.versionIsShort);
       return;
     }
 

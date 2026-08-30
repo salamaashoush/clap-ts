@@ -401,13 +401,19 @@ describe('help and version', () => {
   });
 
   test('--version sets versionRequested', () => {
-    const result = parseArgs(['--version'], cmd({}));
-    expect(result.versionRequested).toBe(true);
+    const versioned: CommandDef = { meta: { name: 'test', version: '1.0.0' } };
+    expect(parseArgs(['--version'], versioned).versionRequested).toBe(true);
   });
 
   test('-V sets versionRequested', () => {
-    const result = parseArgs(['-V'], cmd({}));
-    expect(result.versionRequested).toBe(true);
+    const versioned: CommandDef = { meta: { name: 'test', version: '1.0.0' } };
+    expect(parseArgs(['-V'], versioned).versionRequested).toBe(true);
+  });
+
+  test('no --version flag without a declared version, as in clap', () => {
+    const result = parseArgs(['--version'], cmd({}));
+    expect(result.versionRequested).toBe(false);
+    expect(result.unknown).toEqual(['--version']);
   });
 });
 
@@ -583,7 +589,7 @@ describe('subcommand boundary', () => {
 describe('inferLongArgs ambiguity', () => {
   test('an ambiguous prefix is not resolved', () => {
     const c: CommandDef = {
-      meta: { name: 'test', inferLongArgs: true },
+      meta: { name: 'test', version: '1.0.0', inferLongArgs: true },
       args: { verbose: { type: 'boolean' } },
     };
     // --v is a prefix of both --verbose and the built-in --version.
