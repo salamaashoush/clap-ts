@@ -90,8 +90,16 @@ print(f'{kept} blocks extracted')
 
 import subprocess, sys
 
+# The local binary rather than `npx tsc`: npx will happily fetch an unrelated
+# package called tsc from the registry when resolution misses.
+tsc = ROOT / 'node_modules/.bin/tsc'
+if not tsc.exists():
+    print(f'{tsc} is missing; run the install first', file=sys.stderr)
+    (ROOT / 'src/__readme_check.ts').unlink(missing_ok=True)
+    sys.exit(1)
+
 check = subprocess.run(
-    ['npx', 'tsc', '--noEmit', '-p', 'tsconfig.test.json'],
+    [str(tsc), '--noEmit', '-p', 'tsconfig.test.json'],
     cwd=ROOT, capture_output=True, text=True,
 )
 (ROOT / 'src/__readme_check.ts').unlink(missing_ok=True)
