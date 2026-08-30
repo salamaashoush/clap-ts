@@ -11,7 +11,7 @@ Full clap-style parsing, validation, help generation, and subcommand support. Ze
 - **Subcommands** -- nested command trees with alias support, prefix inference, and external subcommands
 - **Validation** -- required, exclusive, conflictsWith, requires, requiredUnlessPresent, requiredIfEq, valueParser, numArgs, argument groups
 - **Custom value parsers** -- function-based parsers for custom validation and type conversion
-- **Clap-style help** -- colored, terminal-width-aware help with custom headings, templates, and styles
+- **Clap-style help** -- coloured, width-aware help with custom headings, templates, styles, and next-line layout on narrow terminals
 - **Clap-style errors** -- "did you mean?" typo suggestions via Levenshtein distance
 - **Environment variable fallback** -- `env` field on args, with CLI > env > default precedence
 - **Lifecycle hooks** -- setup/run/cleanup pattern for resource management
@@ -29,6 +29,11 @@ Full clap-style parsing, validation, help generation, and subcommand support. Ze
 - **Possible values with help** -- `valueParser` entries carrying help text, aliases and `hidden`
 - **Built-in help subcommand** -- `app help serve`, alongside `-h` and `--help`
 - **Flag subcommands** -- `pacman -S` style via `shortFlag` and `longFlag`
+- **Value sources** -- tell a flag that was passed from one that fell back to env or a default
+- **Lazy subcommands** -- `lazySubCommands` defers building a heavy command tree until it is needed
+- **Shell completions** -- bash, zsh, fish, powershell, elvish and nushell
+- **Man pages** -- roff output validated against `groff`
+- **Markdown docs** -- one document for the whole command tree
 - **Zero dependencies** -- only uses `node:util` (styleText, for colour detection)
 - **Bun and Node.js** -- works on both runtimes
 
@@ -130,6 +135,10 @@ const cmd = defineCommand({
     displayOrder: 1,                          // position among sibling subcommands
     shortFlag: 's',                           // invoke as `tool -s`
     longFlag: 'serve',                        // invoke as `tool --serve`
+    shortFlagAliases: ['S'],                  // extra forms, hidden from help
+    longFlagAliases: ['start'],
+    visibleShortFlagAliases: ['r'],           // extra forms shown in help
+    visibleLongFlagAliases: ['run'],
 
     // Subcommand behavior
     subcommandRequired: true,                 // error if no subcommand
@@ -142,6 +151,10 @@ const cmd = defineCommand({
     subcommandPrecedenceOverArg: true,        // a subcommand name ends value collection
     multicall: true,                          // dispatch on the invoked binary name
     noBinaryName: true,                       // argv carries no binary name to strip
+
+    // Naming
+    binName: 'git stash',                     // shown in the usage line
+    displayName: 'git-stash',                 // shown in the help header
 
     // Parsing behavior
     allowHyphenValues: true,                  // every arg may take -values
@@ -163,7 +176,20 @@ const cmd = defineCommand({
     disableVersionFlag: true,                 // drop the built-in -V/--version
     disableHelpSubcommand: true,              // drop the built-in `help` subcommand
     disableColoredHelp: true,                 // render help without colour
+    color: 'always',                          // 'auto' | 'always' | 'never'
+    flattenHelp: true,                        // summarise subcommand args in place
+    nextHelpHeading: 'Global',                // default heading for args that set none
+    nextDisplayOrder: 100,                    // starting order for args that set none
+    helpExpected: true,                       // reject a visible arg with no description
+
+    // Error tolerance
+    ignoreErrors: true,                       // collect on ParseResult.errors, keep going
+    dontDelimitTrailingValues: true,          // leave values after -- unsplit
   },
+  // Built on first use instead of at definition time
+  lazySubCommands: () => ({ deploy: heavyDeployCommand }),
+  // Applied to each argument of an external subcommand
+  externalSubcommandValueParser: (v) => v.trim(),
   args: { /* ... */ },
   subCommands: { /* ... */ },
   groups: [ /* ... */ ],
@@ -381,7 +407,27 @@ const cmd = defineCommand({
     // Explicit positional position, and group membership
     dest: { type: 'positional', index: 2 },
     src: { type: 'positional', index: 1 },
-    yaml: { type: 'boolean', groups: ['format'] },
+    yaml: { type: 'boolean', group: 'format' },     // or groups: ['format', 'output']
+
+    // Actions beyond set, append and count
+    colour: { type: 'boolean', action: 'setTrue' },
+    noColour: { type: 'boolean', long: 'no-colour', action: 'setFalse' },
+    usage: { type: 'boolean', short: '?', action: 'help' },      // also helpShort, helpLong
+    revision: { type: 'boolean', action: 'version' },
+
+    // Values for a bare multi-value flag
+    origin: {
+      type: 'string',
+      numArgs: { min: 0, max: 3 },
+      defaultMissingValues: ['0', '0', '0'],
+    },
+
+    // Requires another arg only at a particular value
+    source: {
+      type: 'string',
+      requiresIf: ['remote', 'url'],                 // or requiresIfs: [[v, arg], ...]
+    },
+    url: { type: 'string' },
   },
 });
 ```
@@ -715,6 +761,79 @@ const helpText = renderHelp(command);
 const shortHelp = renderHelp(command, undefined, true);
 ```
 
+### Value Sources
+
+Every handler gets a `valueSources` map saying where each argument's value came
+from, which is the only way to tell `--port 3000` from a default of the same
+number.
+
+```ts
+defineCommand({
+  meta: { name: 'serve' },
+  args: {
+    port: { type: 'number', default: 3000, env: 'PORT' },
+  },
+  run({ args, valueSources }) {
+    // 'cli' | 'env' | 'default', or undefined when the arg has no value
+    if (valueSources.get('port') === 'default') {
+      console.log(`Using the default port ${args.port}`);
+    }
+  },
+});
+```
+
+### Lazy Subcommands
+
+`lazySubCommands` takes a thunk, so a command tree whose branches each pull in
+heavy modules only builds the branch being run. It is merged with `subCommands`,
+which wins on a name collision.
+
+```ts
+const main = defineCommand({
+  meta: { name: 'tool' },
+  lazySubCommands: () => ({
+    build: require('./commands/build').default,
+    deploy: require('./commands/deploy').default,
+  }),
+});
+```
+
+The thunk runs on the first token that could be a subcommand, so `tool --version`
+never calls it.
+
+### Man Pages
+
+```ts
+import { renderManPage, generateManPages } from 'clap-ts';
+import { writeFileSync } from 'node:fs';
+
+// One page
+writeFileSync('my-tool.1', renderManPage(main));
+
+// One page per command, named my-tool.1, my-tool-serve.1, and so on
+for (const [file, roff] of generateManPages(main, { section: '1' })) {
+  writeFileSync(`man/${file}`, roff);
+}
+```
+
+The output carries NAME, SYNOPSIS, DESCRIPTION, OPTIONS, SUBCOMMANDS, EXTRA,
+VERSION and AUTHORS, with possible values as a bullet list and notes for
+defaults and environment variables. Check it with `man -l my-tool.1`.
+
+### Markdown Documentation
+
+```ts
+import { renderMarkdownHelp } from 'clap-ts';
+
+writeFileSync('docs/cli.md', renderMarkdownHelp(main, {
+  title: 'CLI Reference',   // optional, demotes command headings by one level
+  footer: 'Generated from the command definitions.',
+}));
+```
+
+Produces one heading per command with its usage line and Commands, Arguments and
+Options lists, nesting subcommands as deeper headings.
+
 ## Value Precedence
 
 Arguments are resolved in this order (highest wins):
@@ -824,6 +943,9 @@ Placeholders: `{name}`, `{version}`, `{about}`, `{usage}`, `{all-args}`, `{argum
 Parsing is a single pass over argv against a spec compiled once per command and
 cached, so flag lookup, value counts and camelCase keys are all resolved ahead of
 time. Feature fields short-circuit on `undefined`, so an unused one costs nothing.
+Subcommand maps are built only when a token could actually be a subcommand, which
+is also what keeps `lazySubCommands` from running its thunk on a flags-only
+invocation.
 
 Earlier versions delegated to `node:util parseArgs`, which re-validates its whole
 `options` object on every call, roughly 170ns per declared option regardless of how
@@ -833,11 +955,15 @@ Benchmarks on AMD Ryzen 9 9950X3D (Bun 1.4), against that `node:util` baseline:
 
 | Scenario | Before | After | Change |
 |----------|--------|-------|--------|
-| Minimal (no args) | 1.47us | 28ns | 52x |
-| Simple (5 flags) | 9.01us | 443ns | 20x |
-| Complex (22 flags) | 14.15us | 1.46us | 9.7x |
-| Subcommand detection | 9.96us | 350ns | 28x |
-| Full pipeline (parse + validate) | 23.01us | 1.27us | 18x |
+| Minimal (no args) | 1.47us | 40ns | 36x |
+| Simple (5 flags) | 9.01us | 494ns | 18x |
+| Complex (22 flags) | 14.15us | 1.80us | 8x |
+| Subcommand detection | 9.96us | 418ns | 24x |
+| Full pipeline (parse + validate) | 23.01us | 1.45us | 16x |
+
+Figures are the minimum of nine pinned runs. Microbenchmarks on this machine are
+bimodal by roughly 1.5x depending on core placement, so a single run tells you
+very little.
 
 To run benchmarks yourself:
 
@@ -917,17 +1043,33 @@ bun run bench
 | multicall / noBinaryName | Yes | Yes |
 | Type-safe parsed args | derive macro | generics |
 | Shell completions (bash/zsh/fish/powershell) | Yes | Yes |
-| Shell completions (elvish, nushell) | Yes | Not yet |
-| Man page generation | Yes | Not yet |
-| Value source (CLI vs env vs default) | Yes | Not yet |
-| flattenHelp, ignoreErrors, deferred building | Yes | Not yet |
+| Shell completions (elvish, nushell) | Yes | Yes |
+| Man page generation | Yes | Yes |
+| Value source (CLI vs env vs default) | Yes | Yes |
+| setTrue / setFalse / help / version actions | Yes | Yes |
+| defaultMissingValues, requiresIf, singular group | Yes | Yes |
+| binName, displayName, color, helpExpected | Yes | Yes |
+| flattenHelp, ignoreErrors, nextHelpHeading | Yes | Yes |
+| nextDisplayOrder, dontDelimitTrailingValues | Yes | Yes |
+| Subcommand flag aliases (short and long) | Yes | Yes |
+| Lazy subcommand building (`defer`) | Yes | Yes |
+| externalSubcommandValueParser | Yes | Yes |
+| Markdown documentation | clap-markdown | Yes |
+| Derive macro | Yes | n/a in TypeScript |
+| dontCollapseArgsInUsage | deprecated no-op | Not implemented |
+
+Two clap settings are deliberately absent. `dont_collapse_args_in_usage` is a
+deprecated no-op upstream, and this usage line never collapsed positionals in the
+first place. The derive macro has no analogue: `defineCommand` already infers the
+parsed argument types from the definition object.
 
 ## Roadmap
 
-- Man page generation
-- Elvish and nushell completions
-- Exposing the value source on `CommandContext`
-- Markdown help output
+Feature parity with clap is complete as far as the builder API goes. What is left
+is polish:
+
+- A `docs` subcommand helper, the way `withCompletions` wraps completion output
+- Coloured `--help` output in the markdown and man renderers' examples
 
 ## Upgrading from 0.2
 
@@ -950,6 +1092,12 @@ in line with clap. Each of these was previously wrong or silently permissive:
   grandchildren, not just the root's.
 - Errors print the usage line of the command that failed rather than the root's.
 - Help shows `[env: VAR=value]`; see `hideEnvValues` and `hideEnv`.
+- The `completions` subcommand validates its shell through `valueParser`, so an
+  unknown one now reports the accepted values and honours a caller's
+  `exit: false` instead of calling `process.exit` from inside its handler.
+- `ParseResult` gained `valueSources`, `errors`, `subCommandArgs`,
+  `subCommandIsExternal` and `versionIsShort`. Only the low-level API sees these;
+  `defineCommand` and `runMain` are unaffected.
 
 ## Requirements
 
