@@ -14,9 +14,129 @@
 
 import { styleText } from 'node:util';
 
-/** Visible width of a string, ignoring ANSI escapes. */
+/**
+ * Character width tables.
+ *
+ * Flat sorted [start, end, ...] pairs searched by bisection: a handful of
+ * comparisons per non-ASCII code point, and no allocation. Covers the East
+ * Asian Wide and Fullwidth ranges plus emoji, which is what actually breaks
+ * column alignment in a terminal.
+ */
+const WIDE = Int32Array.from([
+  0x1100, 0x115f, 0x2329, 0x232a, 0x2e80, 0x303e, 0x3041, 0x33ff,
+  0x3400, 0x4dbf, 0x4e00, 0x9fff, 0xa000, 0xa4cf, 0xa960, 0xa97f,
+  0xac00, 0xd7a3, 0xf900, 0xfaff, 0xfe10, 0xfe19, 0xfe30, 0xfe6f,
+  0xff00, 0xff60, 0xffe0, 0xffe6,
+  0x1f004, 0x1f004, 0x1f0cf, 0x1f0cf, 0x1f18e, 0x1f18e, 0x1f191, 0x1f19a,
+  0x1f200, 0x1f320, 0x1f32d, 0x1f335, 0x1f337, 0x1f37c, 0x1f37e, 0x1f393,
+  0x1f3a0, 0x1f3ca, 0x1f3cf, 0x1f3d3, 0x1f3e0, 0x1f3f0, 0x1f3f4, 0x1f3f4,
+  0x1f3f8, 0x1f43e, 0x1f440, 0x1f440, 0x1f442, 0x1f4fc, 0x1f4ff, 0x1f53d,
+  0x1f54b, 0x1f54e, 0x1f550, 0x1f567, 0x1f57a, 0x1f57a, 0x1f595, 0x1f596,
+  0x1f5a4, 0x1f5a4, 0x1f5fb, 0x1f64f, 0x1f680, 0x1f6c5, 0x1f6cc, 0x1f6cc,
+  0x1f6d0, 0x1f6d2, 0x1f6eb, 0x1f6ec, 0x1f6f4, 0x1f6fc, 0x1f7e0, 0x1f7eb,
+  0x1f90c, 0x1f93a, 0x1f93c, 0x1f945, 0x1f947, 0x1f9ff, 0x1fa70, 0x1faff,
+  0x20000, 0x3fffd,
+]);
+
+/** Marks, joiners and selectors that occupy no column of their own. */
+const ZERO = Int32Array.from([
+  0x0300, 0x036f, 0x0483, 0x0489, 0x0591, 0x05bd, 0x0610, 0x061a,
+  0x064b, 0x065f, 0x0670, 0x0670, 0x06d6, 0x06dc, 0x0730, 0x074a,
+  0x07eb, 0x07f3, 0x0816, 0x0819, 0x081b, 0x0823, 0x0825, 0x0827,
+  0x0829, 0x082d, 0x0859, 0x085b, 0x08e3, 0x0903, 0x093a, 0x093c,
+  0x0941, 0x0948, 0x094d, 0x094d, 0x0951, 0x0957, 0x1ab0, 0x1aff,
+  0x1dc0, 0x1dff, 0x200b, 0x200f, 0x2028, 0x202e, 0x2060, 0x2064,
+  0x20d0, 0x20f0, 0xfe00, 0xfe0f, 0xfe20, 0xfe2f, 0xfeff, 0xfeff,
+  0x1f3fb, 0x1f3ff, 0xe0100, 0xe01ef,
+]);
+
+/** Whether a code point falls inside a flat sorted range table. */
+function inRanges(table: Int32Array, cp: number): boolean {
+  let low = 0;
+  let high = table.length / 2 - 1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (cp < table[mid * 2]!) {
+      high = mid - 1;
+    } else if (cp > table[mid * 2 + 1]!) {
+      low = mid + 1;
+    } else {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Columns a single code point occupies: 0, 1 or 2. */
+export function codePointWidth(cp: number): number {
+  if (cp < 0x7f) {
+    // C0 controls take no space; everything else printable takes one.
+    return cp < 0x20 ? 0 : 1;
+  }
+  if (cp < 0xa0) {
+    return 0;
+  }
+  if (inRanges(ZERO, cp)) {
+    return 0;
+  }
+  return inRanges(WIDE, cp) ? 2 : 1;
+}
+
+const ESC = 0x1b;
+
+/**
+ * Visible width of a string: ANSI escapes skipped, wide characters counted as
+ * two columns, combining marks as none.
+ *
+ * A single pass with no allocation. Measuring by `String.length` lines a table
+ * up wrongly the moment a cell holds CJK or an emoji, and stripping escapes
+ * with a replace allocates a string per cell.
+ */
 export function displayWidth(text: string): number {
-  return stripAnsi(text).length;
+  let width = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+
+    if (code === ESC) {
+      i = skipEscape(text, i);
+      continue;
+    }
+    if (code < 0x7f) {
+      if (code >= 0x20) {
+        width++;
+      }
+      continue;
+    }
+
+    // Combine a surrogate pair into one code point before measuring.
+    let cp = code;
+    if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+      const low = text.charCodeAt(i + 1);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        cp = (code - 0xd800) * 0x400 + low - 0xdc00 + 0x10000;
+        i++;
+      }
+    }
+    width += codePointWidth(cp);
+  }
+  return width;
+}
+
+/** Index of the last character of a CSI sequence starting at `start`. */
+function skipEscape(text: string, start: number): number {
+  if (text.charCodeAt(start + 1) !== 0x5b) {
+    return start;
+  }
+  let i = start + 2;
+  while (i < text.length) {
+    const code = text.charCodeAt(i);
+    // Parameter and intermediate bytes run until a final byte in @ to ~.
+    if (code >= 0x40 && code <= 0x7e) {
+      return i;
+    }
+    i++;
+  }
+  return text.length;
 }
 
 const ANSI = /\x1b\[[0-9;]*m/g;
@@ -25,9 +145,14 @@ function stripAnsi(text: string): string {
   return text.replace(ANSI, '');
 }
 
-/** Pad to a visible width, so styled text lines up with plain text. */
-function pad(text: string, width: number, align: Align): string {
-  const filler = ' '.repeat(Math.max(0, width - displayWidth(text)));
+/**
+ * Pad to a visible width, so styled text lines up with plain text.
+ *
+ * `known` skips re-measuring when the caller already has the width, which the
+ * table always does after truncating.
+ */
+function pad(text: string, width: number, align: Align, known?: number): string {
+  const filler = ' '.repeat(Math.max(0, width - (known ?? displayWidth(text))));
   if (align === 'right') {
     return filler + text;
   }
@@ -38,16 +163,41 @@ function pad(text: string, width: number, align: Align): string {
   return text + filler;
 }
 
-/** Truncate to a visible width, ending in an ellipsis when it does not fit. */
+/**
+ * Truncate to a visible width, ending in an ellipsis when it does not fit.
+ *
+ * Walks code points rather than code units, so a surrogate pair is never split
+ * into a lone half, and a wide character is never counted as one column.
+ */
 export function truncate(text: string, width: number): string {
+  return fit(text, width).text;
+}
+
+/** Truncate and report the resulting visible width, measuring only once. */
+function fit(text: string, width: number): { text: string; width: number } {
+  const actual = displayWidth(text);
   if (width <= 0) {
-    return '';
+    return { text: '', width: 0 };
   }
-  const plain = stripAnsi(text);
-  if (plain.length <= width) {
-    return text;
+  if (actual <= width) {
+    return { text, width: actual };
   }
-  return width === 1 ? '…' : `${plain.slice(0, width - 1)}…`;
+  if (width === 1) {
+    return { text: '…', width: 1 };
+  }
+
+  const budget = width - 1;
+  let used = 0;
+  let out = '';
+  for (const char of stripAnsi(text)) {
+    const cost = codePointWidth(char.codePointAt(0)!);
+    if (used + cost > budget) {
+      break;
+    }
+    used += cost;
+    out += char;
+  }
+  return { text: `${out}…`, width: used + 1 };
 }
 
 export type Align = 'left' | 'right' | 'center';
@@ -155,8 +305,10 @@ export function table<T extends Record<string, unknown>>(
 
   const renderRow = (values: readonly string[], style?: (t: string) => string): string => {
     const parts = values.map((value, i) => {
-      const cut = truncate(value, widths[i]!);
-      return pad(style ? style(cut) : cut, widths[i]!, columns[i]?.align ?? 'left');
+      const cut = fit(value, widths[i]!);
+      // Styling adds escapes but no columns, so the measured width still holds.
+      const shown = style ? style(cut.text) : cut.text;
+      return pad(shown, widths[i]!, columns[i]?.align ?? 'left', cut.width);
     });
     return (prefix + parts.join(spacer)).trimEnd();
   };

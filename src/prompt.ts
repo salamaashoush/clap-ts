@@ -37,8 +37,22 @@ export interface PromptIO {
   readonly interactive: boolean;
 }
 
-/** A PromptIO backed by the real terminal. */
+let sharedIO: PromptIO | undefined;
+
+/**
+ * The PromptIO backed by the real terminal.
+ *
+ * Shared, because a readline interface takes ownership of stdin: a second one
+ * finds the stream already consumed, so two prompts in a row would fail with
+ * the input reported as ended. `close()` releases it, and the next call builds
+ * a fresh one.
+ */
 export function terminalIO(): PromptIO {
+  sharedIO ??= createTerminalIO();
+  return sharedIO;
+}
+
+function createTerminalIO(): PromptIO {
   const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true;
   let rl: ReturnType<typeof createInterface> | undefined;
   let lines: AsyncIterator<string> | undefined;
@@ -70,23 +84,40 @@ export function terminalIO(): PromptIO {
     return value;
   };
 
+  /**
+   * readline decides what to echo through `_writeToOutput`, so overriding that
+   * for one question masks the reply without touching process.stdout. Swapping
+   * the stream's own write instead breaks the interface: the next read reports
+   * the input as ended.
+   */
+  interface Maskable {
+    _writeToOutput?: (chunk: string) => void;
+    output?: { write(chunk: string): void };
+  }
+
   const ask = async (text: string, mask: boolean): Promise<string> => {
     const active = iface();
-    const output = active as unknown as { output?: { write(chunk: string): void } };
-    const sink = output.output;
-
     process.stdout.write(text);
-    if (!mask || sink === undefined) {
+    if (!mask) {
       return nextLine();
     }
 
-    // Swallow the echo for one answer, then close the line the user typed.
-    const original = sink.write.bind(sink);
-    sink.write = () => {};
+    const hooked = active as unknown as Maskable;
+    const original = hooked._writeToOutput;
+    // Echo a bullet per printable character, and nothing for control keys.
+    hooked._writeToOutput = (chunk: string) => {
+      if (chunk.length === 1 && chunk >= ' ') {
+        hooked.output?.write('*');
+      }
+    };
     try {
       return await nextLine();
     } finally {
-      sink.write = original;
+      if (original === undefined) {
+        delete hooked._writeToOutput;
+      } else {
+        hooked._writeToOutput = original;
+      }
       process.stdout.write('\n');
     }
   };
@@ -102,6 +133,7 @@ export function terminalIO(): PromptIO {
       rl?.close();
       rl = undefined;
       lines = undefined;
+      sharedIO = undefined;
     },
   };
 }

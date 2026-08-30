@@ -17,6 +17,7 @@
 
 import { styleText } from 'node:util';
 import type { OutputSink } from './types.js';
+import { displayWidth, truncate } from './output.js';
 
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const ASCII_FRAMES = ['-', '\\', '|', '/'];
@@ -41,6 +42,21 @@ export interface ProgressOptions {
   readonly interval?: number;
   /** Force colour on or off. */
   readonly color?: boolean;
+  /**
+   * Shortest gap between redraws, in milliseconds (default 16, about 60 a
+   * second). A loop that updates thousands of times a second would otherwise
+   * spend its time writing escape sequences nobody can read.
+   */
+  readonly throttle?: number;
+}
+
+const HIDE_CURSOR = '\x1b[?25l';
+const SHOW_CURSOR = '\x1b[?25h';
+const CLEAR_LINE = '\r\x1b[2K';
+
+/** Columns available to draw into. */
+function widthOf(sink: MaybeTty): number {
+  return typeof sink.columns === 'number' && sink.columns > 0 ? sink.columns : 80;
 }
 
 function resolveSink(opts?: ProgressOptions): MaybeTty {
@@ -92,14 +108,25 @@ export function spinner(initialText = '', opts?: ProgressOptions): Spinner {
   let text = initialText;
   let frame = 0;
   let timer: ReturnType<typeof setInterval> | undefined;
+  let cursorHidden = false;
+
+  const restoreCursor = (): void => {
+    if (cursorHidden) {
+      sink.write(SHOW_CURSOR);
+      cursorHidden = false;
+    }
+  };
 
   const clear = (): void => {
-    sink.write('\r\x1b[2K');
+    sink.write(CLEAR_LINE);
   };
 
   const draw = (): void => {
     clear();
-    sink.write(`${paint(color, 'cyan', frames[frame]!)} ${text}`);
+    // Two columns for the frame and its space; anything longer wraps, and a
+    // wrapped line cannot be erased by a single carriage return.
+    const room = widthOf(sink) - 2;
+    sink.write(`${paint(color, 'cyan', frames[frame]!)} ${truncate(text, room)}`);
     frame = (frame + 1) % frames.length;
   };
 
@@ -111,6 +138,7 @@ export function spinner(initialText = '', opts?: ProgressOptions): Spinner {
     const message = done ?? text;
     if (enabled) {
       clear();
+      restoreCursor();
     }
     if (message.length > 0) {
       sink.write(`${paint(color, codes, mark)} ${message}\n`);
@@ -127,6 +155,9 @@ export function spinner(initialText = '', opts?: ProgressOptions): Spinner {
       if (!enabled || timer !== undefined) {
         return api;
       }
+      // A visible cursor flickers over the animating frame.
+      sink.write(HIDE_CURSOR);
+      cursorHidden = true;
       draw();
       timer = setInterval(draw, interval);
       // Never hold the event loop open for a spinner.
@@ -150,6 +181,7 @@ export function spinner(initialText = '', opts?: ProgressOptions): Spinner {
       }
       if (enabled) {
         clear();
+        restoreCursor();
       }
       return api;
     },
@@ -192,11 +224,13 @@ export function progressBar(opts: ProgressBarOptions): ProgressBar {
   const enabled = shouldDraw(sink, opts);
   const color = opts.color ?? styleText('red', 'x') !== 'x';
   const total = Math.max(1, opts.total);
-  const columns = typeof sink.columns === 'number' && sink.columns > 0 ? sink.columns : 80;
+  const columns = widthOf(sink);
   const width = opts.width ?? Math.min(40, Math.max(20, Math.floor(columns / 3)));
+  const throttle = opts.throttle ?? 16;
 
   let current = 0;
   let text = opts.text ?? '';
+  let lastDraw = 0;
 
   const render = (): string => {
     const ratio = Math.min(1, current / total);
@@ -204,12 +238,22 @@ export function progressBar(opts: ProgressBarOptions): ProgressBar {
     const bar = '█'.repeat(filled) + '░'.repeat(width - filled);
     const percent = `${String(Math.round(ratio * 100)).padStart(3)}%`;
     const counts = `${String(current)}/${String(total)}`;
-    const label = text.length > 0 ? ` ${text}` : '';
-    return `${paint(color, 'cyan', bar)} ${percent} ${counts}${label}`;
+    const line = `${bar} ${percent} ${counts}${text.length > 0 ? ` ${text}` : ''}`;
+
+    // Fit the terminal: a line that wraps cannot be erased by a carriage
+    // return, so the next redraw would stack instead of replacing.
+    const fitted = displayWidth(line) > columns ? truncate(line, columns) : line;
+    return color ? fitted.replace(bar, paint(color, 'cyan', bar)) : fitted;
   };
 
-  const draw = (): void => {
-    sink.write(`\r\x1b[2K${render()}`);
+  const draw = (force: boolean): void => {
+    const now = Date.now();
+    // The final frame always lands; the ones in between can be skipped.
+    if (!force && throttle > 0 && now - lastDraw < throttle) {
+      return;
+    }
+    lastDraw = now;
+    sink.write(`${CLEAR_LINE}${render()}`);
   };
 
   const api: ProgressBar = {
@@ -221,7 +265,7 @@ export function progressBar(opts: ProgressBarOptions): ProgressBar {
         text = nextText;
       }
       if (enabled) {
-        draw();
+        draw(false);
       }
       return api;
     },
@@ -232,7 +276,7 @@ export function progressBar(opts: ProgressBarOptions): ProgressBar {
         text = done;
       }
       if (enabled) {
-        draw();
+        draw(true);
         sink.write('\n');
       } else if (text.length > 0) {
         sink.write(`${text}\n`);
@@ -241,7 +285,7 @@ export function progressBar(opts: ProgressBarOptions): ProgressBar {
     },
     stop() {
       if (enabled) {
-        sink.write('\r\x1b[2K');
+        sink.write(CLEAR_LINE);
       }
       return api;
     },

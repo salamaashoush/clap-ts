@@ -79,13 +79,54 @@ function labels(color: boolean): Record<Exclude<LogLevel, 'silent'>, string> {
   };
 }
 
+/**
+ * Render one extra value.
+ *
+ * An Error is the most common thing to log and `JSON.stringify` turns it into
+ * `{}`, losing the message. A cyclic object throws outright, which would take
+ * the CLI down for the sake of a log line, so serialisation falls back to
+ * String rather than propagating.
+ */
+function renderValue(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (value instanceof Error) {
+    return value.stack ?? `${value.name}: ${value.message}`;
+  }
+  if (value === undefined) {
+    return 'undefined';
+  }
+  if (typeof value === 'bigint' || typeof value === 'symbol' || typeof value === 'function') {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value, safeReplacer()) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** A replacer that names a cycle instead of throwing on it. */
+function safeReplacer(): (key: string, value: unknown) => unknown {
+  const seen = new WeakSet<object>();
+  return (_key, value) => {
+    if (typeof value !== 'object' || value === null) {
+      return value;
+    }
+    if (seen.has(value)) {
+      return '[Circular]';
+    }
+    seen.add(value);
+    return value;
+  };
+}
+
 function format(rest: readonly unknown[]): string {
   if (rest.length === 0) {
     return '';
   }
-  return ` ${rest
-    .map((value) => (typeof value === 'string' ? value : JSON.stringify(value)))
-    .join(' ')}`;
+  return ` ${rest.map(renderValue).join(' ')}`;
 }
 
 /** Build a logger writing to a sink. */

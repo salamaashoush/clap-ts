@@ -12,6 +12,7 @@ import {
   promptForArg,
   promptMissing,
   scriptedIO,
+  terminalIO,
 } from '../prompt.js';
 import { defineCommand } from '../runner.js';
 import { runCli, captureArgs } from '../testing.js';
@@ -245,5 +246,20 @@ describe('promptMissing', () => {
     const io = scriptedIO([]);
     await runCli(main, ['--name', 'a', '--port', '1'], { fillMissing: promptMissing({ io }) });
     expect(io.output).toBe('');
+  });
+});
+
+describe('terminalIO is shared', () => {
+  test('successive calls hand back the same interface', () => {
+    // A readline interface owns stdin: a second one finds the stream consumed,
+    // so two standalone prompts in a row would fail with "input ended".
+    expect(terminalIO()).toBe(terminalIO());
+  });
+
+  test('close releases it and the next call builds a fresh one', () => {
+    const first = terminalIO();
+    first.close();
+    expect(terminalIO()).not.toBe(first);
+    terminalIO().close();
   });
 });

@@ -161,3 +161,29 @@ describe('loggerFrom', () => {
     expect(plainStderr).toContain('to stderr');
   });
 });
+
+describe('values that break a naive serialiser', () => {
+  test('an Error keeps its message rather than becoming {}', () => {
+    const sink = collector();
+    createLogger({ sink, ...plain }).error('failed', new Error('boom'));
+    expect(sink.text()).toContain('boom');
+    expect(sink.text()).not.toContain('{}');
+  });
+
+  test('a cyclic object is named, not thrown on', () => {
+    const sink = collector();
+    const circular: Record<string, unknown> = { a: 1 };
+    circular['self'] = circular;
+    expect(() => createLogger({ sink, ...plain }).info('cycle', circular)).not.toThrow();
+    expect(sink.text()).toContain('[Circular]');
+    expect(sink.text()).toContain('"a":1');
+  });
+
+  test('undefined, bigint and symbol survive', () => {
+    const sink = collector();
+    createLogger({ sink, ...plain }).info('values', undefined, 10n, Symbol('s'));
+    expect(sink.text()).toContain('undefined');
+    expect(sink.text()).toContain('10');
+    expect(sink.text()).toContain('Symbol(s)');
+  });
+});

@@ -142,3 +142,80 @@ describe('progressBar', () => {
     expect(bar.render()).toContain('100% 1/1');
   });
 });
+
+describe('drawing stays within the terminal', () => {
+  test('a bar wider than the terminal is trimmed to fit', () => {
+    const sink = { ...collector(), isTTY: true, columns: 40 };
+    const bar = progressBar({
+      total: 10,
+      sink: sink as never,
+      enabled: true,
+      color: false,
+      text: 'a rather long label that will not fit in forty columns',
+    });
+    bar.update(5);
+    expect(bar.render().length).toBeLessThanOrEqual(40);
+  });
+
+  test('a spinner message longer than the terminal is trimmed', () => {
+    const sink = { ...collector(), isTTY: true, columns: 20 };
+    spinner('x'.repeat(100), { sink: sink as never, ...on })
+      .start()
+      .stop();
+    const longest = Math.max(
+      ...sink
+        .text()
+        .split('\r')
+        .map((l) => l.replace(/\x1b\[[0-9?]*[a-zA-Z]/g, '').length),
+    );
+    expect(longest).toBeLessThanOrEqual(20);
+  });
+});
+
+describe('redraws are throttled', () => {
+  test('a tight update loop does not write once per update', () => {
+    const sink = collector();
+    const bar = progressBar({ total: 10_000, sink, enabled: true, color: false });
+    for (let i = 0; i < 10_000; i++) {
+      bar.update(i);
+    }
+    expect(sink.text().split('\r').length - 1).toBeLessThan(50);
+  });
+
+  test('finish always lands, however recently the last redraw was', () => {
+    const sink = collector();
+    progressBar({ total: 3, sink, enabled: true, color: false }).update(1).finish();
+    expect(sink.text()).toContain('100%');
+  });
+
+  test('throttle 0 draws every update', () => {
+    const sink = collector();
+    const bar = progressBar({ total: 5, sink, enabled: true, color: false, throttle: 0 });
+    for (let i = 0; i < 5; i++) {
+      bar.update(i);
+    }
+    expect(sink.text().split('\r').length - 1).toBe(5);
+  });
+});
+
+describe('the cursor is put back', () => {
+  test('a spinner hides it while animating and restores it on succeed', () => {
+    const sink = collector();
+    const spin = spinner('working', { sink, ...on }).start();
+    expect(sink.text()).toContain('\x1b[?25l');
+    spin.succeed('done');
+    expect(sink.text()).toContain('\x1b[?25h');
+  });
+
+  test('stop restores it too', () => {
+    const sink = collector();
+    spinner('working', { sink, ...on }).start().stop();
+    expect(sink.text()).toContain('\x1b[?25h');
+  });
+
+  test('nothing is hidden when drawing is off', () => {
+    const sink = collector();
+    spinner('working', { sink, ...off }).start().stop();
+    expect(sink.text()).not.toContain('\x1b[?25l');
+  });
+});
