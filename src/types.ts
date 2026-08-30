@@ -67,6 +67,9 @@ export type ValueHint =
   | 'url'
   | 'emailAddress';
 
+/** When to colourise help and error output. */
+export type ColorChoice = 'auto' | 'always' | 'never';
+
 /** Supported shells for completion script generation. */
 export type Shell = 'bash' | 'zsh' | 'fish' | 'powershell' | 'elvish' | 'nushell';
 
@@ -233,6 +236,10 @@ export interface StylesDef {
 export interface CommandMeta {
   /** Command name (used in usage line). */
   readonly name: string;
+  /** Name shown in the usage line, when the binary differs from the command. */
+  readonly binName?: string;
+  /** Name shown in the help header and version output. */
+  readonly displayName?: string;
   /** Version string (shown with --version). */
   readonly version?: string;
   /** Longer version text, shown with --version where -V shows `version`. */
@@ -265,6 +272,14 @@ export interface CommandMeta {
   readonly shortFlag?: string;
   /** Invoke this subcommand with a long flag, as in `pacman --sync`. */
   readonly longFlag?: string;
+  /** Extra short flag forms for this subcommand, kept out of help. */
+  readonly shortFlagAliases?: readonly string[];
+  /** Extra long flag forms for this subcommand, kept out of help. */
+  readonly longFlagAliases?: readonly string[];
+  /** Extra short flag forms shown in help. */
+  readonly visibleShortFlagAliases?: readonly string[];
+  /** Extra long flag forms shown in help. */
+  readonly visibleLongFlagAliases?: readonly string[];
   /** Sort key among sibling subcommands in help; lower comes first. */
   readonly displayOrder?: number;
   /** Require a subcommand to be provided. */
@@ -289,6 +304,20 @@ export interface CommandMeta {
   readonly disableHelpSubcommand?: boolean;
   /** Render help without colour even on a capable terminal. */
   readonly disableColoredHelp?: boolean;
+  /** When to colourise output. 'never' matches disableColoredHelp. */
+  readonly color?: ColorChoice;
+  /** Summarise each subcommand's own args inside this command's help. */
+  readonly flattenHelp?: boolean;
+  /** Collect parse errors on ParseResult instead of throwing. */
+  readonly ignoreErrors?: boolean;
+  /** Default help heading for args that set none. */
+  readonly nextHelpHeading?: string;
+  /** Starting display order for args that set none. */
+  readonly nextDisplayOrder?: number;
+  /** Do not split values after `--` on their valueDelimiter. */
+  readonly dontDelimitTrailingValues?: boolean;
+  /** Reject at build time any visible arg that has no description. */
+  readonly helpExpected?: boolean;
   /** Fixed width for help output, overriding the terminal width. */
   readonly termWidth?: number;
   /** Upper bound on the terminal width used for help output. */
@@ -455,6 +484,8 @@ export interface ParseResult {
   readonly versionIsShort: boolean;
   /** Unknown flags that were passed. */
   readonly unknown: readonly string[];
+  /** Errors collected instead of thrown, when meta.ignoreErrors is set. */
+  readonly errors: readonly string[];
   /** Set of arg keys that were explicitly provided (not defaults or env). */
   readonly explicitlySet: ReadonlySet<string>;
   /** Where each parsed value came from, by arg key. */

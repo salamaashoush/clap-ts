@@ -154,6 +154,8 @@ interface CommandSpec {
   readonly subcommandPrecedence: boolean;
   readonly allowMissingPositional: boolean;
   readonly argsOverrideSelf: boolean;
+  readonly ignoreErrors: boolean;
+  readonly dontDelimitTrailingValues: boolean;
   /** Whether any arg declares overridesWith, so occurrence order must be kept. */
   readonly hasOverrides: boolean;
   readonly cmdAllowHyphen: boolean;
@@ -304,6 +306,17 @@ function buildSpec(command: CommandDef): CommandSpec {
     }
   }
 
+  if (command.meta.helpExpected) {
+    const undocumented = all
+      .filter((spec) => !spec.def.hidden && !spec.def.description && !spec.def.longDescription)
+      .map((spec) => spec.key);
+    if (undocumented.length > 0) {
+      throw new CliParseError(
+        `helpExpected is set but these arguments have no description: ${undocumented.join(', ')}`,
+      );
+    }
+  }
+
   // An explicit index overrides declaration order; unindexed positionals keep
   // their relative order after the indexed ones are placed.
   if (positionals.some((spec) => spec.def.index !== undefined)) {
@@ -323,13 +336,23 @@ function buildSpec(command: CommandDef): CommandSpec {
       for (const alias of subMeta.hiddenAliases ?? []) {
         subcommands.set(alias, name);
       }
-      if (subMeta.shortFlag !== undefined || subMeta.longFlag !== undefined) {
+      const shortForms = [
+        ...(subMeta.shortFlag === undefined ? [] : [subMeta.shortFlag]),
+        ...(subMeta.shortFlagAliases ?? []),
+        ...(subMeta.visibleShortFlagAliases ?? []),
+      ];
+      const longForms = [
+        ...(subMeta.longFlag === undefined ? [] : [subMeta.longFlag]),
+        ...(subMeta.longFlagAliases ?? []),
+        ...(subMeta.visibleLongFlagAliases ?? []),
+      ];
+      if (shortForms.length > 0 || longForms.length > 0) {
         subcommandFlags ??= new Map();
-        if (subMeta.shortFlag !== undefined) {
-          subcommandFlags.set(`-${subMeta.shortFlag}`, name);
+        for (const form of shortForms) {
+          subcommandFlags.set(`-${form}`, name);
         }
-        if (subMeta.longFlag !== undefined) {
-          subcommandFlags.set(`--${subMeta.longFlag}`, name);
+        for (const form of longForms) {
+          subcommandFlags.set(`--${form}`, name);
         }
       }
     }
@@ -348,6 +371,8 @@ function buildSpec(command: CommandDef): CommandSpec {
     subcommandPrecedence: command.meta.subcommandPrecedenceOverArg === true,
     allowMissingPositional: command.meta.allowMissingPositional === true,
     argsOverrideSelf,
+    ignoreErrors: command.meta.ignoreErrors === true,
+    dontDelimitTrailingValues: command.meta.dontDelimitTrailingValues === true,
     hasOverrides,
     cmdAllowHyphen,
     allowsNegative,
@@ -417,6 +442,9 @@ interface ParseState {
   readonly result: Record<string, string | number | boolean | string[]>;
   readonly explicitlySet: Set<string>;
   readonly valueSources: Map<string, ValueSource>;
+  readonly errors: string[];
+  /** Keys whose value came from tokens after `--`. */
+  readonly fromRest: Set<string>;
   /**
    * Arg key -> sequence number of its last explicit occurrence. Only built when
    * some arg declares overridesWith, so the common parse allocates no Map.
@@ -751,6 +779,55 @@ function handleShort(
   return i;
 }
 
+/**
+ * Consume one token: a flag-invoked subcommand, a long or short flag, a
+ * subcommand boundary, or a positional. Returns the last index consumed.
+ */
+function handleToken(
+  token: string,
+  rawArgs: readonly string[],
+  i: number,
+  cmdSpec: CommandSpec,
+  state: ParseState,
+): number {
+  if (token.length > 1 && token.charCodeAt(0) === HYPHEN) {
+    const flagSub = cmdSpec.subcommandFlags?.get(token);
+    if (flagSub !== undefined) {
+      state.subCommand = flagSub;
+      state.subCommandArgs = rawArgs.slice(i + 1);
+      return i;
+    }
+    if (token.charCodeAt(1) === HYPHEN) {
+      return handleLong(token, rawArgs, i, cmdSpec, state);
+    }
+    // A negative number is a value, not a flag cluster, when nothing claims the
+    // leading digit as a short flag.
+    const isNegativeValue =
+      cmdSpec.allowsNegative && NEGATIVE_NUMBER.test(token) && !cmdSpec.shorts.has(token[1]!);
+    if (!isNegativeValue) {
+      return handleShort(token, rawArgs, i, cmdSpec, state);
+    }
+  }
+
+  if (state.positionals.length === 0) {
+    const canonical = resolveSubcommand(cmdSpec, token);
+    if (canonical !== undefined) {
+      state.subCommand = canonical;
+      state.subCommandArgs = rawArgs.slice(i + 1);
+      return i;
+    }
+    if (cmdSpec.allowExternal) {
+      state.subCommand = token;
+      state.subCommandIsExternal = true;
+      state.subCommandArgs = rawArgs.slice(i + 1);
+      return i;
+    }
+  }
+
+  state.positionals.push(token);
+  return i;
+}
+
 // ---- Positional Assignment ----
 
 function assignPositionals(cmdSpec: CommandSpec, state: ParseState): void {
@@ -775,6 +852,7 @@ function assignPositionals(cmdSpec: CommandSpec, state: ParseState): void {
       // `last` positionals are only fed from tokens after `--`.
       if (state.rest.length > 0) {
         state.result[spec.key] = state.rest[0]!;
+        state.fromRest.add(spec.key);
         markSet(state, spec.key);
       }
       continue;
@@ -862,7 +940,10 @@ function applyFallbacks(cmdSpec: CommandSpec, state: ParseState): void {
   for (const spec of cmdSpec.all) {
     const { key, def } = spec;
     if (explicitlySet.has(key)) {
-      if (def.valueDelimiter) {
+      if (
+        def.valueDelimiter &&
+        !(cmdSpec.dontDelimitTrailingValues && state.fromRest.has(key))
+      ) {
         const value = result[key];
         if (value !== undefined && (typeof value === 'string' || Array.isArray(value))) {
           result[key] = splitByDelimiter(value, def.valueDelimiter);
@@ -932,6 +1013,8 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
     result: {},
     explicitlySet: new Set<string>(),
     valueSources: new Map<string, ValueSource>(),
+    errors: [],
+    fromRest: new Set<string>(),
     order: cmdSpec.hasOverrides ? new Map<string, number>() : undefined,
     seq: 0,
     unknown: [],
@@ -956,45 +1039,21 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
       break;
     }
 
-    if (token.length > 1 && token.charCodeAt(0) === HYPHEN) {
-      const flagSub = cmdSpec.subcommandFlags?.get(token);
-      if (flagSub !== undefined) {
-        state.subCommand = flagSub;
-        state.subCommandArgs = rawArgs.slice(i + 1);
-        break;
+    // ignoreErrors keeps going after a bad token, collecting the message, the
+    // way clap's Command::ignore_errors does.
+    if (cmdSpec.ignoreErrors) {
+      try {
+        i = handleToken(token, rawArgs, i, cmdSpec, state);
+      } catch (error) {
+        state.errors.push(error instanceof Error ? error.message : String(error));
       }
-      if (token.charCodeAt(1) === HYPHEN) {
-        i = handleLong(token, rawArgs, i, cmdSpec, state);
-        continue;
-      }
-      // A negative number is a value, not a flag cluster, when nothing claims
-      // the leading digit as a short flag.
-      const isNegativeValue =
-        cmdSpec.allowsNegative &&
-        NEGATIVE_NUMBER.test(token) &&
-        !cmdSpec.shorts.has(token[1]!);
-      if (!isNegativeValue) {
-        i = handleShort(token, rawArgs, i, cmdSpec, state);
-        continue;
-      }
+    } else {
+      i = handleToken(token, rawArgs, i, cmdSpec, state);
     }
 
-    if (state.positionals.length === 0) {
-      const canonical = resolveSubcommand(cmdSpec, token);
-      if (canonical !== undefined) {
-        state.subCommand = canonical;
-        state.subCommandArgs = rawArgs.slice(i + 1);
-        break;
-      }
-      if (cmdSpec.allowExternal) {
-        state.subCommand = token;
-        state.subCommandIsExternal = true;
-        state.subCommandArgs = rawArgs.slice(i + 1);
-        break;
-      }
+    if (state.subCommand !== undefined) {
+      break;
     }
-
-    state.positionals.push(token);
   }
 
   assignPositionals(cmdSpec, state);
@@ -1026,6 +1085,7 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
     versionRequested: state.versionRequested,
     versionIsShort: state.versionIsShort,
     unknown: state.unknown,
+    errors: state.errors,
     explicitlySet: state.explicitlySet,
     valueSources: state.valueSources,
   };

@@ -12,6 +12,7 @@ export type {
   ValueParserFn,
   PossibleValue,
   ValueHint,
+  ColorChoice,
   ValueSource,
   Shell,
   ArgDef,

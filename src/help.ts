@@ -40,19 +40,33 @@ const NO_STYLE: StylesDef = {
   command: (s) => s,
 };
 
-function createStyles(overrides?: Partial<StylesDef>, disabled = false): StylesDef {
-  if (disabled) {
+/** Whether colour is on for this command: 'never' off, 'always' forced, else auto. */
+function colourEnabled(meta: CommandMeta): 'off' | 'force' | 'auto' {
+  if (meta.color === 'never' || meta.disableColoredHelp === true) {
+    return 'off';
+  }
+  return meta.color === 'always' ? 'force' : 'auto';
+}
+
+function createStyles(overrides?: Partial<StylesDef>, mode: 'off' | 'force' | 'auto' = 'auto'): StylesDef {
+  if (mode === 'off') {
     return overrides ? { ...NO_STYLE, ...overrides } : NO_STYLE;
   }
+  // styleText only colourises when it judges the stream capable; `always` goes
+  // around that check with the codes it would have used.
+  const paint =
+    mode === 'force'
+      ? (codes: string | string[], text: string) => styleText(codes as never, text, { validateStream: false })
+      : (codes: string | string[], text: string) => styleText(codes as never, text);
   const defaults: StylesDef = {
-    bold: (s) => styleText('bold', s),
-    yellow: (s) => styleText('yellow', s),
-    green: (s) => styleText('green', s),
-    cyan: (s) => styleText('cyan', s),
-    heading: (s) => styleText(['bold', 'yellow'], s),
-    flag: (s) => styleText('green', s),
-    value: (s) => styleText('cyan', s),
-    command: (s) => styleText('bold', s),
+    bold: (s) => paint('bold', s),
+    yellow: (s) => paint('yellow', s),
+    green: (s) => paint('green', s),
+    cyan: (s) => paint('cyan', s),
+    heading: (s) => paint(['bold', 'yellow'], s),
+    flag: (s) => paint('green', s),
+    value: (s) => paint('cyan', s),
+    command: (s) => paint('bold', s),
   };
   if (!overrides) {
     return defaults;
@@ -179,15 +193,25 @@ function argDescription(def: ArgDef, isShortHelp: boolean): string {
 }
 
 /** Sort help entries by displayOrder, keeping declaration order as the tiebreak. */
-function byDisplayOrder(entries: (readonly [string, ArgDef])[]): (readonly [string, ArgDef])[] {
-  if (!entries.some(([, def]) => def.displayOrder !== undefined)) {
+function byDisplayOrder(
+  entries: (readonly [string, ArgDef])[],
+  nextDisplayOrder?: number,
+): (readonly [string, ArgDef])[] {
+  const hasExplicit = entries.some(([, def]) => def.displayOrder !== undefined);
+  if (!hasExplicit && nextDisplayOrder === undefined) {
     return entries;
   }
-  return [...entries].sort(
-    (a, b) =>
-      (a[1].displayOrder ?? Number.MAX_SAFE_INTEGER) -
-      (b[1].displayOrder ?? Number.MAX_SAFE_INTEGER),
-  );
+  // Args without an explicit order fall in after nextDisplayOrder, keeping
+  // declaration order among themselves.
+  const implicitBase = nextDisplayOrder ?? Number.MAX_SAFE_INTEGER;
+  return entries
+    .map((entry, index) => ({
+      entry,
+      order: entry[1].displayOrder ?? implicitBase + index,
+      index,
+    }))
+    .sort((a, b) => a.order - b.order || a.index - b.index)
+    .map((wrapped) => wrapped.entry);
 }
 
 /** Append usage parts for options, positionals, and subcommands. */
@@ -325,7 +349,7 @@ function renderHelpTemplate(
   const usageStr = usageParts.join(' ');
 
   const argsLines: string[] = [];
-  renderPositionalSection(argsLines, argsDef, styles, termWidth, isShortHelp);
+  renderPositionalSection(argsLines, argsDef, styles, termWidth, isShortHelp, meta.nextDisplayOrder);
   const argumentsStr = argsLines.join('\n');
 
   const optLines: string[] = [];
@@ -361,6 +385,7 @@ function renderPositionalSection(
   styles: StylesDef,
   termWidth: number,
   isShortHelp: boolean,
+  nextDisplayOrder?: number,
 ): void {
   const positionals = Object.entries(argsDef).filter(([_, d]) => d.type === 'positional');
   const visiblePositionals = positionals.filter(([_, d]) => !isArgHiddenForMode(d, isShortHelp));
@@ -372,7 +397,7 @@ function renderPositionalSection(
   lines.push(styles.heading('Arguments:'));
 
   const entries: HelpEntry[] = [];
-  for (const [key, def] of byDisplayOrder(visiblePositionals)) {
+  for (const [key, def] of byDisplayOrder(visiblePositionals, nextDisplayOrder)) {
     const name = def.valueName ?? key.toUpperCase();
     const label = `  ${styles.value(`<${name}>`)}`;
     const rawLen = name.length + 4;
@@ -407,7 +432,7 @@ function renderOptionsSection(
 
   // Group options by helpHeading
   const groups = new Map<string, [string, ArgDef][]>();
-  const defaultHeading = 'Options';
+  const defaultHeading = meta.nextHelpHeading ?? 'Options';
 
   for (const entry of options) {
     const heading = entry[1].helpHeading ?? defaultHeading;
@@ -425,7 +450,7 @@ function renderOptionsSection(
 
     const entries: HelpEntry[] = [];
 
-    for (const [key, def] of byDisplayOrder(groupOptions)) {
+    for (const [key, def] of byDisplayOrder(groupOptions, meta.nextDisplayOrder)) {
       const { flag, rawLen } = formatArgFlag(key, def, styles);
       entries.push({
         label: `  ${flag}`,
@@ -488,9 +513,10 @@ export function renderHelp(
     return meta.overrideHelp.endsWith('\n') ? meta.overrideHelp : `${meta.overrideHelp}\n`;
   }
 
-  const styles = createStyles(styleOverrides, meta.disableColoredHelp === true);
+  const styles = createStyles(styleOverrides, colourEnabled(meta));
   const termWidth = getTerminalWidth(meta);
-  const fullName = parentNames ? [...parentNames, meta.name].join(' ') : meta.name;
+  const usageName = meta.binName ?? meta.name;
+  const fullName = parentNames ? [...parentNames, usageName].join(' ') : usageName;
 
   // Custom template override
   if (meta.helpTemplate) {
@@ -507,7 +533,8 @@ export function renderHelp(
   }
 
   // Header: "Description (name vX.Y.Z)"
-  const nameVersion = meta.version ? `${meta.name} v${meta.version}` : meta.name;
+  const headerName = meta.displayName ?? meta.name;
+  const nameVersion = meta.version ? `${headerName} v${meta.version}` : headerName;
   const headerDesc = meta.about ?? meta.description ?? '';
   if (headerDesc) {
     lines.push(`${headerDesc} (${nameVersion})`);
@@ -535,7 +562,7 @@ export function renderHelp(
   // Positional arguments
   const argsDef = command.args ?? {};
   const posLines: string[] = [];
-  renderPositionalSection(posLines, argsDef, styles, termWidth, isShortHelp);
+  renderPositionalSection(posLines, argsDef, styles, termWidth, isShortHelp, meta.nextDisplayOrder);
   if (posLines.length > 0) {
     lines.push('');
     lines.push(...posLines);
@@ -564,6 +591,32 @@ export function renderHelp(
 }
 
 /** Render the subcommands section of help output. */
+/**
+ * One indented line per visible arg of a subcommand, as clap's flatten_help
+ * shows so `git stash --help` can summarise `push` and `pop` in place.
+ */
+function flattenedSubcommandArgs(sub: CommandDef, styles: StylesDef): string[] | undefined {
+  const argsDef: Record<string, ArgDef> = sub.args ?? {};
+  const visible = Object.entries(argsDef).filter(([, def]) => !def.hidden);
+  if (visible.length === 0) {
+    return undefined;
+  }
+  const named = visible.map(([key, def]) => ({
+    raw:
+      def.type === 'positional'
+        ? `<${def.valueName ?? key.toUpperCase()}>`
+        : `--${def.long ?? key}`,
+    def,
+  }));
+  const width = Math.max(...named.map((n) => n.raw.length));
+
+  return named.map(({ raw, def }) => {
+    const painted = def.type === 'positional' ? styles.value(raw) : styles.flag(raw);
+    const padding = ' '.repeat(width - raw.length + 2);
+    return `      ${painted}${def.description ? `${padding}${def.description}` : ''}`;
+  });
+}
+
 function renderSubcommandSection(
   lines: string[],
   command: CommandDef,
@@ -571,6 +624,7 @@ function renderSubcommandSection(
   termWidth: number,
   fullName: string,
 ): void {
+  const flatten = command.meta.flattenHelp === true;
   lines.push('');
   lines.push(styles.heading(`${command.meta.subcommandHelpHeading ?? 'Commands'}:`));
 
@@ -603,6 +657,12 @@ function renderSubcommandSection(
     if (def.meta.longFlag !== undefined) {
       extras.push(`--${def.meta.longFlag}`);
     }
+    for (const alias of def.meta.visibleShortFlagAliases ?? []) {
+      extras.push(`-${alias}`);
+    }
+    for (const alias of def.meta.visibleLongFlagAliases ?? []) {
+      extras.push(`--${alias}`);
+    }
 
     let label: string;
     let rawLen: number;
@@ -615,7 +675,12 @@ function renderSubcommandSection(
       rawLen = name.length + 2;
     }
 
-    subEntries.push({ label, rawLen, desc: def.meta.description ?? '' });
+    subEntries.push({
+      label,
+      rawLen,
+      desc: def.meta.description ?? '',
+      detail: flatten ? flattenedSubcommandArgs(def, styles) : undefined,
+    });
   }
 
   if (!command.meta.disableHelpSubcommand) {
@@ -643,13 +708,14 @@ export function renderUsage(
   styleOverrides?: Partial<StylesDef>,
 ): string {
   const { meta } = command;
-  const styles = createStyles(styleOverrides, meta.disableColoredHelp === true);
+  const styles = createStyles(styleOverrides, colourEnabled(meta));
 
   if (meta.overrideUsage !== undefined) {
     return `${styles.heading('Usage:')} ${meta.overrideUsage}`;
   }
 
-  const fullName = parentNames ? [...parentNames, meta.name].join(' ') : meta.name;
+  const usageName = meta.binName ?? meta.name;
+  const fullName = parentNames ? [...parentNames, usageName].join(' ') : usageName;
   const usageParts = [styles.heading('Usage:'), styles.command(fullName)];
   appendUsageParts(usageParts, command);
 
@@ -686,7 +752,7 @@ export function showError(
   parentNames?: string[],
   styleOverrides?: Partial<StylesDef>,
 ): void {
-  const styles = createStyles(styleOverrides);
+  const styles = createStyles(styleOverrides, colourEnabled(command.meta));
   const usage = renderUsage(command, parentNames, styleOverrides);
   const output = `${styles.bold('error:')} ${message}\n\n${usage}\n\nFor more information, try '${styles.flag('--help')}'.\n`;
   process.stderr.write(output);
