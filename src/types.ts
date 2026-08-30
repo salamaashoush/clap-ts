@@ -444,6 +444,16 @@ export interface CommandDef<T extends ArgsDef = ArgsDef> {
   cleanup?(ctx: CommandContext<T>): void | Promise<void>;
 }
 
+/** Options for man page generation. */
+export interface ManOptions {
+  /** Page name; defaults to the command's binName, displayName or name. */
+  readonly name?: string;
+  /** Man section number (default '1'). */
+  readonly section?: string;
+  /** Manual title shown in the page header. */
+  readonly manual?: string;
+}
+
 // ---- Options ----
 
 /** Options for runMain / runCommand. */

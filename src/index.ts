@@ -25,6 +25,7 @@ export type {
   CommandContext,
   CommandDef,
   RunOptions,
+  ManOptions,
   ParseResult,
   InferArgValue,
   InferArgOptional,
@@ -50,3 +51,6 @@ export { defineCommand, defineArgs, defineArg, runCommand, runMain } from './run
 
 // Shell completions
 export { generateCompletions, withCompletions } from './completions.js';
+
+// Man pages
+export { renderManPage, generateManPages } from './man.js';
