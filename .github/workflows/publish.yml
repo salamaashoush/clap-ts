@@ -53,6 +53,19 @@ jobs:
             exit 1
           fi
 
+      # A version carrying a prerelease part goes out under `next`, so a
+      # release candidate never becomes what `npm install clap-ts` gives you.
+      - name: Choose the dist-tag
+        id: disttag
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          case "$pkg" in
+            *-*) tag=next ;;
+            *)   tag=latest ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publishing $pkg under dist-tag $tag"
+
       - name: Typecheck
         run: bun run typecheck
 
@@ -72,4 +85,4 @@ jobs:
       # credential, and generates the provenance attestation itself, so
       # --provenance is no longer passed explicitly.
       - name: Publish to npm
-        run: npm publish --access public
+        run: npm publish --access public --tag ${{ steps.disttag.outputs.tag }}
