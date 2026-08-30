@@ -525,12 +525,7 @@ function applyFlagOnly(spec: ArgSpec, negated: boolean, state: ParseState): void
 }
 
 /** Store one or more parsed values for an arg, honouring the append action. */
-function applyValues(
-  spec: ArgSpec,
-  values: string[],
-  state: ParseState,
-  cmdSpec: CommandSpec,
-): void {
+function applyValues(spec: ArgSpec, values: string[], state: ParseState): void {
   const name = displayName(spec);
 
   // A second occurrence of a single-value arg is an error in clap unless the
@@ -625,7 +620,7 @@ function consumeValues(
   if (values.length === 0) {
     applyMissingValue(spec, state);
   } else {
-    applyValues(spec, values, state, cmdSpec);
+    applyValues(spec, values, state);
   }
   return i - 1;
 }
@@ -765,7 +760,7 @@ function handleLong(
       markSet(state, spec.key);
       return i;
     }
-    applyValues(spec, [inline], state, cmdSpec);
+    applyValues(spec, [inline], state);
     return i;
   }
 
@@ -827,7 +822,7 @@ function handleShort(
     if (c + 1 < token.length) {
       // clap strips a single leading '=' so `-o=v` and `-ov` agree.
       const attached = token.charCodeAt(c + 1) === 61 ? token.slice(c + 2) : token.slice(c + 1);
-      applyValues(spec, [attached], state, cmdSpec);
+      applyValues(spec, [attached], state);
       return i;
     }
     if (spec.def.requireEquals) {
