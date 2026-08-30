@@ -597,3 +597,31 @@ describe('inferLongArgs ambiguity', () => {
     expect(parseArgs(['--verb'], c).args.verbose).toBe(true);
   });
 });
+
+describe('explicitlySet', () => {
+  test('tracks which args were explicitly provided', () => {
+    const command = cmd({
+      port: { type: 'number', long: 'port', default: 3000 },
+      verbose: { type: 'boolean', long: 'verbose' },
+    });
+    const result = parseArgs(['--verbose'], command);
+    expect(result.explicitlySet.has('verbose')).toBe(true);
+    expect(result.explicitlySet.has('port')).toBe(false);
+  });
+});
+
+describe('helpIsShort', () => {
+  test('detects -h as short help', () => {
+    const command = cmd({});
+    const result = parseArgs(['-h'], command);
+    expect(result.helpRequested).toBe(true);
+    expect(result.helpIsShort).toBe(true);
+  });
+
+  test('detects --help as long help', () => {
+    const command = cmd({});
+    const result = parseArgs(['--help'], command);
+    expect(result.helpRequested).toBe(true);
+    expect(result.helpIsShort).toBe(false);
+  });
+});

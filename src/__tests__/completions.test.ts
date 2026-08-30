@@ -1,5 +1,5 @@
 /**
- * Tests for shell completion generation and dynamic completions.
+ * Tests for shell completion generation across every supported shell.
  */
 
 import { describe, test, expect } from 'bun:test';

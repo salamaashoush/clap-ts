@@ -785,6 +785,33 @@ defineCommand({
 });
 ```
 
+### Testing
+
+```ts
+import { runCli, captureArgs } from 'clap-ts/testing';
+
+const result = await runCli(main, ['serve', '--port', '8080']);
+expect(result.exitCode).toBe(0);
+expect(result.plainStdout).toContain('listening');
+```
+
+`runCli` returns `stdout`, `stderr`, `plainStdout`, `plainStderr`, `exitCode` and
+`error`. No process is spawned and no global is patched: output goes to
+collectors through `RunOptions.stdout`/`stderr` and the exit code arrives via
+`onExit`. An error thrown by a handler comes back on `error` rather than being
+rethrown, so one assertion style covers success and failure.
+
+`captureArgs` reports the parsed arguments without running the handler body,
+which works for a subcommand as well as the root:
+
+```ts
+const { args } = await captureArgs(main, ['serve', '--port', '9']);
+expect(args.port).toBe(9);
+```
+
+Handlers that write through `ctx.stdout` rather than `process.stdout` are
+captured too.
+
 ### Configuration Files
 
 ```ts

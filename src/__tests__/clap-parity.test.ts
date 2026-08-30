@@ -7,7 +7,7 @@ import { describe, test, expect } from 'bun:test';
 import { parseArgs, CliParseError, validate } from '../index.js';
 import { renderHelp, renderUsage, showError } from '../help.js';
 import { stripAnsi } from '../testing.js';
-import type { CommandDef, ArgsDef } from '../types.js';
+import type { CommandDef } from '../types.js';
 
 // ---- Test Helpers ----
 
@@ -361,7 +361,7 @@ describe('clap help format', () => {
 
   test('help output has correct structure', () => {
     const help = renderHelp(helpCmd);
-    const stripped = help.replace(/\x1b\[[0-9;]*m/g, '');
+    const stripped = stripAnsi(help);
 
     // Header: "Description (command v1.0.0)"
     expect(stripped).toContain('Description (command v1.0.0)');
@@ -398,7 +398,7 @@ describe('clap help format', () => {
 
   test('subcommand aliases shown in parens', () => {
     const help = renderHelp(helpCmd);
-    const stripped = help.replace(/\x1b\[[0-9;]*m/g, '');
+    const stripped = stripAnsi(help);
     expect(stripped).toMatch(/proxy \(p\)/);
     expect(stripped).toMatch(/auth \(a\)/);
   });
@@ -455,7 +455,7 @@ describe('clap subcommand alias behavior', () => {
 
   test('help shows alias in parens', () => {
     const help = renderHelp(subCmd);
-    const stripped = help.replace(/\x1b\[[0-9;]*m/g, '');
+    const stripped = stripAnsi(help);
     expect(stripped).toMatch(/proxy \(p, px\)/);
   });
 });
@@ -676,7 +676,7 @@ describe('argument groups', () => {
 describe('renderUsage', () => {
   test('renders compact usage line', () => {
     const usage = renderUsage(simpleCmd);
-    const stripped = usage.replace(/\x1b\[[0-9;]*m/g, '');
+    const stripped = stripAnsi(usage);
     expect(stripped).toContain('Usage: program [OPTIONS]');
   });
 });

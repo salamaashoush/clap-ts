@@ -185,3 +185,83 @@ describe('numArgs validation', () => {
     );
   });
 });
+
+describe('exclusive', () => {
+  test('exclusive arg cannot be used with any other', () => {
+    const command = cmd({
+      init: { type: 'boolean', long: 'init', exclusive: true },
+      verbose: { type: 'boolean', long: 'verbose' },
+    });
+    expect(() => parseAndValidate(['--init', '--verbose'], command)).toThrow(
+      /cannot be used with/,
+    );
+  });
+
+  test('exclusive arg alone is fine', () => {
+    const command = cmd({
+      init: { type: 'boolean', long: 'init', exclusive: true },
+      verbose: { type: 'boolean', long: 'verbose' },
+    });
+    expect(() => parseAndValidate(['--init'], command)).not.toThrow();
+  });
+});
+
+describe('requiredUnlessPresent', () => {
+  test('not required when alternative is present', () => {
+    const command = cmd({
+      file: { type: 'string', long: 'file', required: true, requiredUnlessPresent: 'stdin' },
+      stdin: { type: 'boolean', long: 'stdin' },
+    });
+    expect(() => parseAndValidate(['--stdin'], command)).not.toThrow();
+  });
+
+  test('required when alternative is absent', () => {
+    const command = cmd({
+      file: { type: 'string', long: 'file', required: true, requiredUnlessPresent: 'stdin' },
+      stdin: { type: 'boolean', long: 'stdin' },
+    });
+    expect(() => parseAndValidate([], command)).toThrow('required arguments');
+  });
+
+  test('works with array of alternatives', () => {
+    const command = cmd({
+      file: {
+        type: 'string',
+        long: 'file',
+        required: true,
+        requiredUnlessPresent: ['stdin', 'generate'],
+      },
+      stdin: { type: 'boolean', long: 'stdin' },
+      generate: { type: 'boolean', long: 'generate' },
+    });
+    expect(() => parseAndValidate(['--generate'], command)).not.toThrow();
+  });
+});
+
+describe('requiredIfEq', () => {
+  test('required when condition met', () => {
+    const command = cmd({
+      format: { type: 'string', long: 'format' },
+      output: { type: 'string', long: 'output', requiredIfEq: ['format', 'file'] },
+    });
+    expect(() => parseAndValidate(['--format', 'file'], command)).toThrow('required arguments');
+  });
+
+  test('not required when condition not met', () => {
+    const command = cmd({
+      format: { type: 'string', long: 'format' },
+      output: { type: 'string', long: 'output', requiredIfEq: ['format', 'file'] },
+    });
+    expect(() => parseAndValidate(['--format', 'stdout'], command)).not.toThrow();
+  });
+
+  test('passes when arg is provided', () => {
+    const command = cmd({
+      format: { type: 'string', long: 'format' },
+      output: { type: 'string', long: 'output', requiredIfEq: ['format', 'file'] },
+    });
+    expect(() =>
+      parseAndValidate(['--format', 'file', '--output', '/tmp/out'], command),
+    ).not.toThrow();
+  });
+});

@@ -1,9 +1,10 @@
 /**
- * Runner tests - tests for defineCommand, defineArgs, runCommand, and subcommand resolution.
+ * Runner tests: defineCommand and friends, subcommand dispatch, global argument
+ * inheritance, lazy subcommands and the introspection helpers.
  */
 
 import { describe, test, expect } from 'bun:test';
-import { defineCommand, defineArgs, defineArg, runCommand, runMain } from '../runner.js';
+import { defineCommand, defineArgs, defineArg, runCommand } from '../runner.js';
 import { parseArgs, subCommandsOf, hasSubCommands } from '../parser.js';
 import { validate } from '../validation.js';
 import { renderHelp } from '../help.js';
@@ -160,7 +161,7 @@ describe('runCommand', () => {
 
 // ---- Subcommand Resolution ----
 
-describe('subcommand resolution via runMain', () => {
+describe('subcommand resolution', () => {
   test('resolves subcommand and runs it', async () => {
     let ranSubcommand = false;
     const root = defineCommand({
@@ -177,7 +178,7 @@ describe('subcommand resolution via runMain', () => {
       },
     });
 
-    await runMain(root, { argv: ['serve', '--port', '8080'], exit: false });
+    await runCli(root, ['serve', '--port', '8080']);
     expect(ranSubcommand).toBe(true);
   });
 
@@ -195,7 +196,7 @@ describe('subcommand resolution via runMain', () => {
       },
     });
 
-    await runMain(root, { argv: ['s'], exit: false });
+    await runCli(root, ['s']);
     expect(ranSubcommand).toBe(true);
   });
 });
@@ -220,7 +221,7 @@ describe('flags before a subcommand', () => {
     });
 
     for (const argv of [['serve'], ['--verbose', 'serve'], ['-v', 'serve']]) {
-      await runMain(root, { argv, exit: false });
+      await runCli(root, argv);
     }
     expect(seen).toEqual([80, 80, 80]);
   });
@@ -246,7 +247,7 @@ describe('global args inheritance', () => {
       subCommands: { mid },
     });
 
-    await runMain(root, { argv: ['mid', 'leaf', '--color', 'red', '--debug'], exit: false });
+    await runCli(root, ['mid', 'leaf', '--color', 'red', '--debug']);
     expect(received['color']).toBe('red');
     expect(received['debug']).toBe(true);
   });
@@ -324,23 +325,20 @@ describe('global arg values reach the running command', () => {
 
   test('a global given before the subcommand still arrives', async () => {
     seen = {};
-    await runMain(root, { argv: ['--verbose', 'mid', 'leaf'], exit: false });
+    await runCli(root, ['--verbose', 'mid', 'leaf']);
     expect(seen['verbose']).toBe(true);
   });
 
   test('a global from an intermediate level arrives too', async () => {
     seen = {};
-    await runMain(root, { argv: ['-v', 'mid', '--color', 'red', 'leaf'], exit: false });
+    await runCli(root, ['-v', 'mid', '--color', 'red', 'leaf']);
     expect(seen['verbose']).toBe(true);
     expect(seen['color']).toBe('red');
   });
 
   test('the deepest occurrence wins', async () => {
     seen = {};
-    await runMain(root, {
-      argv: ['mid', '--color', 'red', 'leaf', '--color', 'blue'],
-      exit: false,
-    });
+    await runCli(root, ['mid', '--color', 'red', 'leaf', '--color', 'blue']);
     expect(seen['color']).toBe('blue');
   });
 
@@ -352,7 +350,7 @@ describe('global arg values reach the running command', () => {
       args: { token: { type: 'string', global: true, required: true } },
       subCommands: { child },
     });
-    await runMain(parent, { argv: ['--token', 'abc', 'child'], exit: false });
+    await runCli(parent, ['--token', 'abc', 'child']);
     expect(ran).toBe(true);
   });
 });
@@ -371,10 +369,10 @@ describe('lazy subcommands', () => {
     });
 
     // A plain flag parse never touches the subcommand tree.
-    await runMain(root, { argv: ['--verbose'], exit: false });
+    await runCli(root, ['--verbose']);
     expect(built).toBe(0);
 
-    await runMain(root, { argv: ['serve'], exit: false });
+    await runCli(root, ['serve']);
     expect(built).toBe(1);
   });
 
@@ -418,7 +416,7 @@ describe('externalSubcommandValueParser', () => {
         received = rawArgs;
       },
     });
-    await runMain(root, { argv: ['my-plugin', 'a', 'b'], exit: false });
+    await runCli(root, ['my-plugin', 'a', 'b']);
     expect(received).toEqual(['A', 'B']);
   });
 
