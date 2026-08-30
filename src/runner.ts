@@ -19,6 +19,7 @@ import type {
 } from './types.js';
 import {
   CliParseError,
+  coerceValue,
   collectGlobalArgs,
   getRawArgs,
   hasSubCommands,
@@ -79,6 +80,103 @@ export function defineArgs<const T extends ArgsDef>(args: T): T {
  */
 export function defineArg<const T extends ArgDef>(arg: T): T {
   return arg;
+}
+
+// ---- Config Layer ----
+
+/**
+ * The config section that applies to a command, built by walking the path from
+ * the root. A nested object named for a subcommand scopes its contents to that
+ * command; scalar keys stay in scope all the way down.
+ */
+function configForPath(
+  config: Record<string, unknown>,
+  path: readonly string[],
+): Record<string, unknown> {
+  let scope: Record<string, unknown> = config;
+  const merged: Record<string, unknown> = {};
+
+  const takeScalars = (from: Record<string, unknown>): void => {
+    for (const key of Object.keys(from)) {
+      const value = from[key];
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        continue;
+      }
+      merged[key] = value;
+    }
+  };
+
+  takeScalars(scope);
+  for (const segment of path) {
+    const next = scope[segment];
+    if (next === null || typeof next !== 'object' || Array.isArray(next)) {
+      break;
+    }
+    scope = next as Record<string, unknown>;
+    takeScalars(scope);
+  }
+  return merged;
+}
+
+/**
+ * Fill args the command line and environment left alone from the config.
+ * A default already applied during parsing loses to a config value, which is
+ * what makes the precedence CLI > env > config > default.
+ */
+function applyConfig(
+  result: ParseResult,
+  command: CommandDef,
+  source: Record<string, unknown> | (() => Record<string, unknown> | undefined),
+  path: readonly string[],
+): ParseResult {
+  const argsDef: ArgsDef = command.args ?? {};
+
+  // Nothing to fill means nothing to load: with a thunk, a command line that
+  // answered every argument never touches the filesystem.
+  let anyOpen = false;
+  for (const key of Object.keys(argsDef)) {
+    const from = result.valueSources.get(key);
+    if (from !== 'cli' && from !== 'env') {
+      anyOpen = true;
+      break;
+    }
+  }
+  if (!anyOpen) {
+    return result;
+  }
+
+  const config = typeof source === 'function' ? source() : source;
+  if (config === undefined) {
+    return result;
+  }
+  const section = configForPath(config, path);
+
+  const args = { ...result.args };
+  const valueSources = new Map(result.valueSources);
+  let changed = false;
+
+  for (const key of Object.keys(argsDef)) {
+    const raw = section[key];
+    if (raw === undefined) {
+      continue;
+    }
+    const source = valueSources.get(key);
+    if (source === 'cli' || source === 'env') {
+      continue;
+    }
+
+    const def = argsDef[key]!;
+    const name = def.type === 'positional' ? `<${def.valueName ?? key}>` : `--${def.long ?? key}`;
+    const coerce = (value: unknown): string | number | boolean =>
+      coerceValue(String(value), def, `config:${name}`);
+
+    args[key] = Array.isArray(raw) ? raw.map((v) => String(coerce(v))) : coerce(raw);
+    args[kebabToCamel(key)] = args[key]!;
+    valueSources.set(key, 'config');
+    changed = true;
+  }
+
+  return changed ? { ...result, args, valueSources } : result;
 }
 
 // ---- Global Args ----
@@ -547,8 +645,15 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
       return;
     }
 
-    // Fold ancestor-provided global values into the command that runs.
-    const finalResult = applyInheritedGlobals(parseResult, inheritedValues);
+    // Fold ancestor-provided global values into the command that runs, then
+    // let the config fill whatever is still on its default.
+    let finalResult = applyInheritedGlobals(parseResult, inheritedValues);
+    if (opts?.config !== undefined) {
+      finalResult = applyConfig(finalResult, effectiveCommand, opts.config, [
+        ...parentNames.slice(1),
+        ...(parentNames.length > 0 ? [command.meta.name] : []),
+      ]);
+    }
 
     // Validate parsed args
     validate(finalResult, effectiveCommand);

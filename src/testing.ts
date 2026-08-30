@@ -11,8 +11,9 @@
  * ```
  */
 
-import type { CommandDef, RunOptions } from './types.js';
+import type { CommandDef, CommandContext, RunOptions } from './types.js';
 import { runMain } from './runner.js';
+import { subCommandsOf, hasSubCommands } from './parser.js';
 
 /** Everything a run produced. */
 export interface CliResult {
@@ -102,30 +103,57 @@ export async function runCli(
 }
 
 /**
- * Capture the args a command's handler receives, without running its body.
- *
- * Useful for asserting on parsing alone: the original `run` is replaced, so
- * side effects stay out of the test.
+ * Replace every `run` in the tree with the same probe, so whichever command the
+ * argv resolves to is the one observed.
+ */
+function probeTree(
+  command: CommandDef<any>,
+  onRun: (ctx: CommandContext<any>) => void,
+): CommandDef<any> {
+  const probed: Record<string, CommandDef<any>> = {};
+  if (hasSubCommands(command)) {
+    for (const [name, sub] of Object.entries(subCommandsOf(command))) {
+      probed[name] = probeTree(sub, onRun);
+    }
+  }
+
+  return {
+    ...command,
+    run: onRun,
+    ...(hasSubCommands(command) ? { subCommands: probed, lazySubCommands: undefined } : {}),
+  };
+}
+
+/**
+ * Capture the args the handler that actually runs receives, without running its
+ * body. Every `run` in the tree is replaced, so this works for a subcommand as
+ * well as the root.
  *
  * ```ts
- * const { args, result } = await captureArgs(main, ['--port', '9']);
+ * const { args } = await captureArgs(main, ['serve', '--port', '9']);
  * expect(args.port).toBe(9);
  * ```
+ *
+ * Note this forces any `lazySubCommands` thunk, since the tree has to be walked
+ * to be probed.
  */
 export async function captureArgs(
   command: CommandDef<any>,
   argv: readonly string[] = [],
   opts?: RunCliOptions,
-): Promise<{ args: Record<string, unknown>; result: CliResult }> {
+): Promise<{
+  args: Record<string, unknown>;
+  context?: CommandContext<any>;
+  result: CliResult;
+}> {
   let args: Record<string, unknown> = {};
+  let context: CommandContext<any> | undefined;
 
-  const probe: CommandDef<any> = {
-    ...command,
-    run(ctx) {
-      args = ctx.args as Record<string, unknown>;
-    },
-  };
+  const probe = probeTree(command, (ctx) => {
+    args = ctx.args as Record<string, unknown>;
+    context = ctx;
+  });
 
   const result = await runCli(probe, argv, opts);
-  return { args, result };
+  return { args, ...(context === undefined ? {} : { context }), result };
 }

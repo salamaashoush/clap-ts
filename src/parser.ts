@@ -397,7 +397,11 @@ function getSpec(command: CommandDef): CommandSpec {
 
 // ---- Value Coercion ----
 
-function coerceValue(value: string, def: ArgDef, argName: string): string | number | boolean {
+export function coerceValue(
+  value: string,
+  def: ArgDef,
+  argName: string,
+): string | number | boolean {
   if (typeof def.valueParser === 'function') {
     try {
       const parsed = def.valueParser(value);

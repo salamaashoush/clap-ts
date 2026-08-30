@@ -27,8 +27,11 @@ export type ArgAction =
   | 'helpLong'
   | 'version';
 
-/** Where a parsed value came from. Mirrors clap's ValueSource. */
-export type ValueSource = 'cli' | 'env' | 'default';
+/**
+ * Where a parsed value came from. Extends clap's ValueSource with 'config',
+ * which sits between an environment variable and a default.
+ */
+export type ValueSource = 'cli' | 'env' | 'config' | 'default';
 
 /** Min/max constraint for number of values an argument accepts. */
 export interface NumArgs {
@@ -504,6 +507,20 @@ export interface RunOptions {
    * alongside `exit: false` to observe the code without ending the process.
    */
   readonly onExit?: (code: number) => void;
+  /**
+   * Values from a configuration file, filling args that the command line and
+   * environment left alone. A nested object keyed by a subcommand name scopes
+   * its contents to that command; scalar keys apply at every level.
+   *
+   * `loadConfig` from `clap-ts/config` produces this shape.
+   *
+   * Pass a thunk to defer the file search: it runs only if some argument is
+   * still sitting on its default, so a fully specified command line reads
+   * nothing from disk.
+   */
+  readonly config?:
+    | Record<string, unknown>
+    | (() => Record<string, unknown> | undefined);
 }
 
 // ---- Parser Result ----
