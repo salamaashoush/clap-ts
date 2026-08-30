@@ -4,28 +4,13 @@
 
 import { describe, test, expect } from 'bun:test';
 import { parseArgs, CliParseError, getRawArgs } from '../parser.js';
-import { defineCommand, runMain } from '../runner.js';
+import { defineCommand } from '../runner.js';
+import { runCli } from '../testing.js';
 import { renderHelp, renderUsage } from '../help.js';
 import type { CommandDef } from '../types.js';
 
 function plain(text: string): string {
   return text.replace(/\x1b\[[0-9;]*m/g, '');
-}
-
-/** Capture stdout while fn runs, with ANSI codes stripped. */
-async function captureStdout(fn: () => Promise<void> | void): Promise<string> {
-  let output = '';
-  const original = process.stdout.write;
-  process.stdout.write = ((chunk: string) => {
-    output += chunk;
-    return true;
-  }) as typeof process.stdout.write;
-  try {
-    await fn();
-  } finally {
-    process.stdout.write = original;
-  }
-  return plain(output);
 }
 
 // ---- help subcommand ----
@@ -43,13 +28,13 @@ describe('built-in help subcommand', () => {
   });
 
   test('app help prints the root help', async () => {
-    const out = await captureStdout(() => runMain(root, { argv: ['help'], exit: false }));
+    const { plainStdout: out } = await runCli(root, ['help']);
     expect(out).toContain('Usage: app');
     expect(out).toContain('serve');
   });
 
   test('app help serve prints the subcommand help', async () => {
-    const out = await captureStdout(() => runMain(root, { argv: ['help', 'serve'], exit: false }));
+    const { plainStdout: out } = await runCli(root, ['help', 'serve']);
     expect(out).toContain('Usage: app serve');
     expect(out).toContain('Port to bind');
   });
@@ -101,19 +86,17 @@ describe('version output', () => {
   });
 
   test('-V prints the short version', async () => {
-    const out = await captureStdout(() => runMain(root, { argv: ['-V'], exit: false }));
+    const { plainStdout: out } = await runCli(root, ['-V']);
     expect(out.trim()).toBe('app 1.2.3');
   });
 
   test('--version prints the long version', async () => {
-    const out = await captureStdout(() => runMain(root, { argv: ['--version'], exit: false }));
+    const { plainStdout: out } = await runCli(root, ['--version']);
     expect(out.trim()).toBe('app 1.2.3 (build abcdef)');
   });
 
   test('propagateVersion gives the subcommand a --version', async () => {
-    const out = await captureStdout(() =>
-      runMain(root, { argv: ['serve', '--version'], exit: false }),
-    );
+    const { plainStdout: out } = await runCli(root, ['serve', '--version']);
     expect(out).toContain('1.2.3');
   });
 

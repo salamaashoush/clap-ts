@@ -12,6 +12,7 @@ import type {
   CommandDef,
   ParsedArgs,
   ParseResult,
+  OutputSink,
   RunOptions,
   StylesDef,
   ValueSource,
@@ -171,6 +172,7 @@ export async function runCommand<T extends ArgsDef>(
   rawArgs: readonly string[] = [],
   subCommand?: string,
   valueSources: ReadonlyMap<string, ValueSource> = new Map(),
+  io?: { stdout: OutputSink; stderr: OutputSink },
 ): Promise<void> {
   const ctx: CommandContext<T> = {
     rawArgs,
@@ -178,6 +180,8 @@ export async function runCommand<T extends ArgsDef>(
     cmd: command,
     subCommand,
     valueSources,
+    stdout: io?.stdout ?? process.stdout,
+    stderr: io?.stderr ?? process.stderr,
     data: {},
   };
 
@@ -269,28 +273,23 @@ function simpleCharDistance(a: string, b: string, maxDist: number): number {
 function handleHelpRequest(
   command: CommandDef,
   parentNames: string[],
-  shouldExit: boolean,
   isShortHelp: boolean,
-  styles?: Partial<StylesDef>,
+  io: RunIO,
 ): void {
-  showHelp(command, parentNames.length > 0 ? parentNames : undefined, isShortHelp, styles);
-  if (shouldExit) {
-    process.exit(0);
-  }
+  showHelp(command, parentNames.length > 0 ? parentNames : undefined, isShortHelp, io.styles, io.stdout);
+  io.finish(0);
 }
 
 /** Handle --version request. */
 function handleVersionRequest(
   effectiveCommand: CommandDef,
   rootCommand: CommandDef,
-  shouldExit: boolean,
   isShort: boolean,
+  io: RunIO,
 ): void {
   const versionMeta = effectiveCommand.meta.version ? effectiveCommand.meta : rootCommand.meta;
-  showVersion(versionMeta, isShort);
-  if (shouldExit) {
-    process.exit(0);
-  }
+  showVersion(versionMeta, isShort, io.stdout);
+  io.finish(0);
 }
 
 /** Handle an unrecognized subcommand with typo suggestion. */
@@ -298,8 +297,7 @@ function handleUnrecognizedSubcommand(
   unknownName: string,
   command: CommandDef,
   parentNames: string[],
-  shouldExit: boolean,
-  styles?: Partial<StylesDef>,
+  io: RunIO,
 ): void {
   const allNames = collectSubcommandNames(subCommandsOf(command));
   let msg = `unrecognized subcommand '${unknownName}'`;
@@ -309,10 +307,39 @@ function handleUnrecognizedSubcommand(
     msg += `\n\n  tip: a similar subcommand exists: '${bestMatch}'`;
   }
 
-  showError(msg, command, parentNames.length > 0 ? parentNames : undefined, styles);
-  if (shouldExit) {
-    process.exit(2);
-  }
+  fail(msg, command, parentNames, io);
+}
+
+/**
+ * Where a run writes and how it ends. `finish` reports the code to any onExit
+ * hook and exits the process unless the caller opted out.
+ */
+interface RunIO {
+  readonly stdout: OutputSink;
+  readonly stderr: OutputSink;
+  readonly styles?: Partial<StylesDef>;
+  finish(code: number): void;
+}
+
+function makeRunIO(opts?: RunOptions): RunIO {
+  const shouldExit = opts?.exit !== false;
+  return {
+    stdout: opts?.stdout ?? process.stdout,
+    stderr: opts?.stderr ?? process.stderr,
+    styles: opts?.styles,
+    finish(code) {
+      opts?.onExit?.(code);
+      if (shouldExit) {
+        process.exit(code);
+      }
+    },
+  };
+}
+
+/** Print a usage error against the given command and settle on exit code 2. */
+function fail(message: string, command: CommandDef, parentNames: string[], io: RunIO): void {
+  showError(message, command, parentNames.length > 0 ? parentNames : undefined, io.styles, io.stderr);
+  io.finish(2);
 }
 
 // ---- runMain ----
@@ -327,9 +354,9 @@ function handleUnrecognizedSubcommand(
  * ```
  */
 export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): Promise<void> {
+  const io = makeRunIO(opts);
   const shouldExit = opts?.exit !== false;
   const showHelpOnEmpty = opts?.showHelpOnEmpty !== false;
-  const styles = opts?.styles;
 
   // Tracked through the descent so an error names the command that failed,
   // not the root.
@@ -386,7 +413,7 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
           parentNames,
           parseResult.positionals.slice(1),
         );
-        handleHelpRequest(target.command, target.parentNames, shouldExit, false, styles);
+        handleHelpRequest(target.command, target.parentNames, false, io);
         return;
       }
 
@@ -413,15 +440,7 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
       }
 
       if (command.meta.argsConflictsWithSubcommands && parseResult.explicitlySet.size > 0) {
-        showError(
-          'arguments cannot be used with subcommands',
-          effectiveCommand,
-          parentNames.length > 0 ? parentNames : undefined,
-          styles,
-        );
-        if (shouldExit) {
-          process.exit(2);
-        }
+        fail('arguments cannot be used with subcommands', effectiveCommand, parentNames, io);
         return;
       }
 
@@ -463,23 +482,22 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
           externalArgs,
           externalSubcommand,
           parseResult.valueSources,
+          io,
         );
       }
-      if (shouldExit) {
-        process.exit(0);
-      }
+      io.finish(0);
       return;
     }
 
     // Handle --help
     if (parseResult.helpRequested) {
-      handleHelpRequest(effectiveCommand, parentNames, shouldExit, parseResult.helpIsShort, styles);
+      handleHelpRequest(effectiveCommand, parentNames, parseResult.helpIsShort, io);
       return;
     }
 
     // Handle --version
     if (parseResult.versionRequested) {
-      handleVersionRequest(effectiveCommand, rootCommand, shouldExit, parseResult.versionIsShort);
+      handleVersionRequest(effectiveCommand, rootCommand, parseResult.versionIsShort, io);
       return;
     }
 
@@ -489,13 +507,13 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
       rawArgs.length === 0 &&
       hasSubCommands(rootCommand)
     ) {
-      handleHelpRequest(rootCommand, [], shouldExit, false, styles);
+      handleHelpRequest(rootCommand, [], false, io);
       return;
     }
 
     // argRequiredElseHelp: show help if no args were explicitly provided
     if (command.meta.argRequiredElseHelp && parseResult.explicitlySet.size === 0) {
-      handleHelpRequest(effectiveCommand, parentNames, shouldExit, false, styles);
+      handleHelpRequest(effectiveCommand, parentNames, false, io);
       return;
     }
 
@@ -510,26 +528,22 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
       if (command.meta.subcommandRequired) {
         if (parseResult.positionals.length > 0) {
           handleUnrecognizedSubcommand(
-            parseResult.positionals[0]!, effectiveCommand, parentNames, shouldExit, styles,
+            parseResult.positionals[0]!, effectiveCommand, parentNames, io,
           );
         } else {
-          showError("a subcommand is required but one was not provided", effectiveCommand,
-            parentNames.length > 0 ? parentNames : undefined, styles);
-          if (shouldExit) {
-            process.exit(2);
-          }
+          fail('a subcommand is required but one was not provided', effectiveCommand, parentNames, io);
         }
         return;
       }
 
       if (parseResult.positionals.length > 0) {
         handleUnrecognizedSubcommand(
-          parseResult.positionals[0]!, effectiveCommand, parentNames, shouldExit, styles,
+          parseResult.positionals[0]!, effectiveCommand, parentNames, io,
         );
         return;
       }
 
-      handleHelpRequest(effectiveCommand, parentNames, shouldExit, false, styles);
+      handleHelpRequest(effectiveCommand, parentNames, false, io);
       return;
     }
 
@@ -546,29 +560,28 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
       rawArgs,
       undefined,
       finalResult.valueSources,
+      io,
     );
 
     // If the command's run() didn't call process.exit() itself, exit cleanly.
     // This prevents the process from hanging when the caller uses `void runMain()`
     // instead of `await runMain()` — the unawaited Promise would otherwise keep
     // the event loop alive due to pending NAPI handles or other resources.
-    if (shouldExit) {
-      process.exit(0);
-    }
+    io.finish(0);
   } catch (error) {
     if (error instanceof CliParseError) {
-      showError(error.message, errorCommand, errorParents.length > 0 ? errorParents : undefined, styles);
-      if (shouldExit) {
-        process.exit(2);
-      }
+      fail(error.message, errorCommand, errorParents, io);
       return;
     }
 
     // Unexpected error
-    if (shouldExit) {
+    if (shouldExit || opts?.onExit !== undefined) {
       const message = error instanceof Error ? error.message : String(error);
-      process.stderr.write(`error: ${message}\n`);
-      process.exit(1);
+      io.stderr.write(`error: ${message}\n`);
+      io.finish(1);
+      if (!shouldExit) {
+        return;
+      }
     }
     throw error;
   }

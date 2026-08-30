@@ -9,6 +9,8 @@
 import type { ArgDef, CommandDef, MarkdownOptions } from './types.js';
 import { hasSubCommands, possibleValues, subCommandsOf } from './parser.js';
 
+export type { MarkdownOptions } from './types.js';
+
 /** Escape the markdown that could break a list item or table cell. */
 function esc(text: string): string {
   return text.replaceAll(/([\\`*_[\]<>|])/g, '\\$1');

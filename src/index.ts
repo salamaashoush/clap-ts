@@ -15,6 +15,7 @@ export type {
   ColorChoice,
   ValueSource,
   Shell,
+  OutputSink,
   ArgDef,
   ArgsDef,
   StyleFn,
@@ -25,8 +26,6 @@ export type {
   CommandContext,
   CommandDef,
   RunOptions,
-  ManOptions,
-  MarkdownOptions,
   ParseResult,
   InferArgValue,
   InferArgOptional,
@@ -54,11 +53,5 @@ export { renderHelp, renderUsage, showHelp, showVersion, showError } from './hel
 // Runner (main API)
 export { defineCommand, defineArgs, defineArg, runCommand, runMain } from './runner.js';
 
-// Shell completions
-export { generateCompletions, withCompletions } from './completions.js';
-
-// Man pages
-export { renderManPage, generateManPages } from './man.js';
-
-// Markdown documentation
-export { renderMarkdownHelp } from './markdown.js';
+// Generators live behind subpaths so a running CLI never loads them:
+//   clap-ts/completions, clap-ts/man, clap-ts/markdown

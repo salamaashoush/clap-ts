@@ -4,7 +4,8 @@
 
 import { describe, test, expect } from 'bun:test';
 import { generateCompletions, withCompletions } from '../completions.js';
-import { defineCommand, runMain } from '../runner.js';
+import { defineCommand } from '../runner.js';
+import { runCli } from '../testing.js';
 import type { CommandDef } from '../types.js';
 
 // ---- Test Command ----
@@ -274,21 +275,10 @@ describe('withCompletions', () => {
       args: { verbose: { type: 'boolean', description: 'Verbose' } },
     });
 
-    let output = '';
-    const originalWrite = process.stdout.write;
-    process.stdout.write = ((chunk: string) => {
-      output += chunk;
-      return true;
-    }) as typeof process.stdout.write;
-
-    try {
-      await runMain(withCompletions(root), { argv: ['completions', 'bash'], exit: false });
-      expect(output).toContain('# bash completion for myapp');
-      expect(output).toContain('complete -o default');
-      expect(output).toContain('--verbose');
-    } finally {
-      process.stdout.write = originalWrite;
-    }
+    const { stdout } = await runCli(withCompletions(root), ['completions', 'bash']);
+    expect(stdout).toContain('# bash completion for myapp');
+    expect(stdout).toContain('complete -o default');
+    expect(stdout).toContain('--verbose');
   });
 
   test('completions subcommand outputs zsh script', async () => {
@@ -297,51 +287,20 @@ describe('withCompletions', () => {
       args: { port: { type: 'number', short: 'p', description: 'Port' } },
     });
 
-    let output = '';
-    const originalWrite = process.stdout.write;
-    process.stdout.write = ((chunk: string) => {
-      output += chunk;
-      return true;
-    }) as typeof process.stdout.write;
-
-    try {
-      await runMain(withCompletions(root), { argv: ['completions', 'zsh'], exit: false });
-      expect(output).toContain('#compdef myapp');
-      expect(output).toContain('--port');
-    } finally {
-      process.stdout.write = originalWrite;
-    }
+    const { stdout } = await runCli(withCompletions(root), ['completions', 'zsh']);
+    expect(stdout).toContain('#compdef myapp');
+    expect(stdout).toContain('--port');
   });
 
   test('completions subcommand errors on invalid shell', async () => {
     const root = defineCommand({ meta: { name: 'myapp' } });
 
-    let errOutput = '';
-    const originalWrite = process.stderr.write;
-    const originalExit = process.exit;
-    let exitCode: number | undefined;
-
-    process.stderr.write = ((chunk: string) => {
-      errOutput += chunk;
-      return true;
-    }) as typeof process.stderr.write;
-    process.exit = ((code: number) => {
-      exitCode = code;
-      throw new Error('exit');
-    }) as typeof process.exit;
-
-    try {
-      // Not exit:false here: the point is that an unknown shell exits 2.
-      await runMain(withCompletions(root), { argv: ['completions', 'invalid'] });
-    } catch {
-      // expected from mocked process.exit
-    } finally {
-      process.stderr.write = originalWrite;
-      process.exit = originalExit;
-    }
-
-    expect(errOutput).toContain("invalid value 'invalid' for '<SHELL>'");
-    expect(errOutput).toContain('[possible values: bash, zsh, fish, powershell, elvish, nushell]');
+    const { plainStderr, exitCode } = await runCli(withCompletions(root), [
+      'completions',
+      'invalid',
+    ]);
+    expect(plainStderr).toContain("invalid value 'invalid' for '<SHELL>'");
+    expect(plainStderr).toContain('[possible values: bash, zsh, fish, powershell, elvish, nushell]');
     expect(exitCode).toBe(2);
   });
 

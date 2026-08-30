@@ -7,6 +7,7 @@ import { parseArgs, CliParseError } from '../parser.js';
 import { validate } from '../validation.js';
 import { renderHelp } from '../help.js';
 import { defineCommand, runMain } from '../runner.js';
+import { runCli } from '../testing.js';
 import type { CommandDef, ArgsDef } from '../types.js';
 
 // ---- Helpers ----
@@ -516,23 +517,15 @@ describe('helpTemplate', () => {
 
 describe('subcommandRequired', () => {
   test('errors when no subcommand provided', async () => {
-    let errored = false;
-    const originalWrite = process.stderr.write;
-    process.stderr.write = (() => true) as typeof process.stderr.write;
-    try {
-      const root = defineCommand({
-        meta: { name: 'app', subcommandRequired: true },
-        subCommands: {
-          serve: defineCommand({ meta: { name: 'serve' }, run() {} }),
-        },
-      });
-      await runMain(root, { argv: [], exit: false, showHelpOnEmpty: false });
-    } catch (e) {
-      errored = true;
-    } finally {
-      process.stderr.write = originalWrite;
-    }
-    // Should have printed error (not thrown since exit: false)
+    const root = defineCommand({
+      meta: { name: 'app', subcommandRequired: true },
+      subCommands: {
+        serve: defineCommand({ meta: { name: 'serve' }, run() {} }),
+      },
+    });
+    const { plainStderr, exitCode } = await runCli(root, [], { showHelpOnEmpty: false });
+    expect(plainStderr).toContain('a subcommand is required but one was not provided');
+    expect(exitCode).toBe(2);
   });
 
   test('works when subcommand provided', async () => {
@@ -601,55 +594,35 @@ describe('allowExternalSubcommands', () => {
 
 describe('argsConflictsWithSubcommands', () => {
   test('errors when args and subcommand both present', async () => {
-    let errorOutput = '';
-    const originalWrite = process.stderr.write;
-    process.stderr.write = ((chunk: string) => {
-      errorOutput += chunk;
-      return true;
-    }) as typeof process.stderr.write;
-
-    try {
-      const root = defineCommand({
-        meta: { name: 'app', argsConflictsWithSubcommands: true },
-        args: {
-          verbose: { type: 'boolean', long: 'verbose' },
-        },
-        subCommands: {
-          serve: defineCommand({ meta: { name: 'serve' }, run() {} }),
-        },
-      });
-      await runMain(root, { argv: ['--verbose', 'serve'], exit: false });
-      expect(stripAnsi(errorOutput)).toContain('cannot be used with subcommands');
-    } finally {
-      process.stderr.write = originalWrite;
-    }
+    const root = defineCommand({
+      meta: { name: 'app', argsConflictsWithSubcommands: true },
+      args: {
+        verbose: { type: 'boolean', long: 'verbose' },
+      },
+      subCommands: {
+        serve: defineCommand({ meta: { name: 'serve' }, run() {} }),
+      },
+    });
+    const { plainStderr, exitCode } = await runCli(root, ['--verbose', 'serve']);
+    expect(plainStderr).toContain('cannot be used with subcommands');
+    expect(exitCode).toBe(2);
   });
 });
 
 describe('argRequiredElseHelp', () => {
   test('shows help when no args provided', async () => {
-    let helpOutput = '';
-    const originalWrite = process.stdout.write;
-    process.stdout.write = ((chunk: string) => {
-      helpOutput += chunk;
-      return true;
-    }) as typeof process.stdout.write;
-
-    try {
-      const root = defineCommand({
-        meta: { name: 'tool', argRequiredElseHelp: true },
-        args: {
-          input: { type: 'string', long: 'input' },
-        },
-        run() {
-          throw new Error('should not run');
-        },
-      });
-      await runMain(root, { argv: [], exit: false, showHelpOnEmpty: false });
-      expect(stripAnsi(helpOutput)).toContain('Usage:');
-    } finally {
-      process.stdout.write = originalWrite;
-    }
+    const root = defineCommand({
+      meta: { name: 'tool', argRequiredElseHelp: true },
+      args: {
+        input: { type: 'string', long: 'input' },
+      },
+      run() {
+        throw new Error('should not run');
+      },
+    });
+    const { plainStdout, exitCode } = await runCli(root, [], { showHelpOnEmpty: false });
+    expect(plainStdout).toContain('Usage:');
+    expect(exitCode).toBe(0);
   });
 });
 

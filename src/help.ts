@@ -8,7 +8,7 @@
  */
 
 import { styleText } from 'node:util';
-import type { ArgDef, CommandDef, CommandMeta, StylesDef } from './types.js';
+import type { ArgDef, CommandDef, CommandMeta, OutputSink, StylesDef } from './types.js';
 import { hasSubCommands, possibleValues, subCommandsOf } from './parser.js';
 
 // ---- Color Support ----
@@ -730,17 +730,21 @@ export function showHelp(
   parentNames?: string[],
   isShortHelp = false,
   styleOverrides?: Partial<StylesDef>,
+  out: OutputSink = process.stdout,
 ): void {
-  const text = renderHelp(command, parentNames, isShortHelp, styleOverrides);
-  process.stdout.write(text);
+  out.write(renderHelp(command, parentNames, isShortHelp, styleOverrides));
 }
 
 /**
  * Print version to stdout.
  */
-export function showVersion(meta: CommandMeta, isShort = false): void {
+export function showVersion(
+  meta: CommandMeta,
+  isShort = false,
+  out: OutputSink = process.stdout,
+): void {
   const version = (!isShort && meta.longVersion) || meta.version || '0.0.0';
-  process.stdout.write(`${meta.name} ${version}\n`);
+  out.write(`${meta.displayName ?? meta.name} ${version}\n`);
 }
 
 /**
@@ -751,9 +755,11 @@ export function showError(
   command: CommandDef,
   parentNames?: string[],
   styleOverrides?: Partial<StylesDef>,
+  out: OutputSink = process.stderr,
 ): void {
   const styles = createStyles(styleOverrides, colourEnabled(command.meta));
   const usage = renderUsage(command, parentNames, styleOverrides);
-  const output = `${styles.bold('error:')} ${message}\n\n${usage}\n\nFor more information, try '${styles.flag('--help')}'.\n`;
-  process.stderr.write(output);
+  out.write(
+    `${styles.bold('error:')} ${message}\n\n${usage}\n\nFor more information, try '${styles.flag('--help')}'.\n`,
+  );
 }

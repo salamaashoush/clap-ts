@@ -418,6 +418,12 @@ export interface CommandContext<T extends ArgsDef = ArgsDef> {
    * no value at all.
    */
   readonly valueSources: ReadonlyMap<string, ValueSource>;
+  /**
+   * Where the handler should write. Defaults to process.stdout/stderr; the
+   * testing helpers swap them so a run can be asserted without spawning.
+   */
+  readonly stdout: OutputSink;
+  readonly stderr: OutputSink;
   /** Arbitrary user data (for passing state between setup/run/cleanup). */
   data: Record<string, unknown>;
 }
@@ -474,6 +480,11 @@ export interface MarkdownOptions {
 
 // ---- Options ----
 
+/** Somewhere to write output. `process.stdout` satisfies this. */
+export interface OutputSink {
+  write(chunk: string): void;
+}
+
 /** Options for runMain / runCommand. */
 export interface RunOptions {
   /** Override argv (defaults to Bun.argv / process.argv). */
@@ -484,6 +495,15 @@ export interface RunOptions {
   readonly showHelpOnEmpty?: boolean;
   /** Custom styles for help and error output. */
   readonly styles?: Partial<StylesDef>;
+  /** Where help and version output goes (default: process.stdout). */
+  readonly stdout?: OutputSink;
+  /** Where errors go (default: process.stderr). */
+  readonly stderr?: OutputSink;
+  /**
+   * Called with the exit code the run settled on, before `process.exit`. Set
+   * alongside `exit: false` to observe the code without ending the process.
+   */
+  readonly onExit?: (code: number) => void;
 }
 
 // ---- Parser Result ----

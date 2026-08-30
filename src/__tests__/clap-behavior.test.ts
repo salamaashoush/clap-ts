@@ -6,6 +6,7 @@
 import { describe, test, expect } from 'bun:test';
 import { parseArgs, CliParseError, validate } from '../index.js';
 import { renderHelp, renderUsage, showError } from '../help.js';
+import { stripAnsi } from '../testing.js';
 import type { CommandDef, ArgsDef } from '../types.js';
 
 // ---- Test Helpers ----
@@ -83,22 +84,15 @@ describe('clap error format', () => {
       },
     };
 
-    // Capture stderr output
+    // showError takes the sink as its last argument, so nothing global moves.
     let output = '';
-    const originalWrite = process.stderr.write;
-    process.stderr.write = ((chunk: string) => {
-      output += chunk;
-      return true;
-    }) as typeof process.stderr.write;
+    showError('test error message', cmd, undefined, undefined, {
+      write: (chunk) => {
+        output += chunk;
+      },
+    });
 
-    try {
-      showError('test error message', cmd);
-    } finally {
-      process.stderr.write = originalWrite;
-    }
-
-    // Strip ANSI codes for comparison
-    const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+    const stripped = stripAnsi(output);
     expect(stripped).toContain('error: test error message');
     expect(stripped).toContain('Usage: myapp [OPTIONS]');
     expect(stripped).toContain("For more information, try '--help'.");

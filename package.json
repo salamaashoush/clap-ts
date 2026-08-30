@@ -9,6 +9,22 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./completions": {
+      "types": "./dist/completions.d.ts",
+      "import": "./dist/completions.js"
+    },
+    "./man": {
+      "types": "./dist/man.d.ts",
+      "import": "./dist/man.js"
+    },
+    "./markdown": {
+      "types": "./dist/markdown.d.ts",
+      "import": "./dist/markdown.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js"
     }
   },
   "files": [

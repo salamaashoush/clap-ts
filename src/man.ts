@@ -9,6 +9,8 @@
 import type { ArgDef, CommandDef, ManOptions } from './types.js';
 import { hasSubCommands, possibleValues, subCommandsOf } from './parser.js';
 
+export type { ManOptions } from './types.js';
+
 // ---- Escaping ----
 
 /**

@@ -7,6 +7,7 @@ import { defineCommand, defineArgs, defineArg, runCommand, runMain } from '../ru
 import { parseArgs, subCommandsOf, hasSubCommands } from '../parser.js';
 import { validate } from '../validation.js';
 import { renderHelp } from '../help.js';
+import { runCli } from '../testing.js';
 import type { ArgsDef, CommandDef, ParsedArgs } from '../types.js';
 
 // ---- defineCommand ----
@@ -201,22 +202,6 @@ describe('subcommand resolution via runMain', () => {
 
 // ---- Dispatch regressions ----
 
-/** Capture everything written to stderr while fn runs. */
-async function captureStderr(fn: () => Promise<void>): Promise<string> {
-  let output = '';
-  const original = process.stderr.write;
-  process.stderr.write = ((chunk: string) => {
-    output += chunk;
-    return true;
-  }) as typeof process.stderr.write;
-  try {
-    await fn();
-  } finally {
-    process.stderr.write = original;
-  }
-  return output.replace(/\x1b\[[0-9;]*m/g, '');
-}
-
 describe('flags before a subcommand', () => {
   test('parent flags do not block dispatch', async () => {
     const seen: (number | undefined)[] = [];
@@ -281,17 +266,16 @@ describe('error output names the failing command', () => {
   });
 
   test('missing required arg shows the subcommand usage', async () => {
-    const err = await captureStderr(() => runMain(root, { argv: ['serve'], exit: false }));
-    expect(err).toContain('Usage: app serve');
-    expect(err).not.toContain('Usage: app [OPTIONS]');
+    const { plainStderr, exitCode } = await runCli(root, ['serve']);
+    expect(plainStderr).toContain('Usage: app serve');
+    expect(plainStderr).not.toContain('Usage: app [OPTIONS]');
+    expect(exitCode).toBe(2);
   });
 
   test('unknown flag shows the subcommand usage and a suggestion', async () => {
-    const err = await captureStderr(() =>
-      runMain(root, { argv: ['serve', '--prot', '3'], exit: false }),
-    );
-    expect(err).toContain('Usage: app serve');
-    expect(err).toContain("a similar argument exists: '--port'");
+    const { plainStderr } = await runCli(root, ['serve', '--prot', '3']);
+    expect(plainStderr).toContain('Usage: app serve');
+    expect(plainStderr).toContain("a similar argument exists: '--port'");
   });
 });
 
@@ -439,25 +423,15 @@ describe('externalSubcommandValueParser', () => {
   });
 
   test('a throwing parser surfaces as a parse error', async () => {
-    let err = '';
-    const originalWrite = process.stderr.write;
-    process.stderr.write = ((chunk: string) => {
-      err += chunk;
-      return true;
-    }) as typeof process.stderr.write;
-    try {
-      const root = defineCommand({
-        meta: { name: 'git', allowExternalSubcommands: true },
-        externalSubcommandValueParser: () => {
-          throw new Error('nope');
-        },
-        run() {},
-      });
-      await runMain(root, { argv: ['plugin', 'x'], exit: false });
-    } finally {
-      process.stderr.write = originalWrite;
-    }
-    expect(err).toContain("invalid value 'x': nope");
+    const root = defineCommand({
+      meta: { name: 'git', allowExternalSubcommands: true },
+      externalSubcommandValueParser: () => {
+        throw new Error('nope');
+      },
+      run() {},
+    });
+    const { plainStderr } = await runCli(root, ['plugin', 'x']);
+    expect(plainStderr).toContain("invalid value 'x': nope");
   });
 });
 

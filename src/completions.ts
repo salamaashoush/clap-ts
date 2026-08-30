@@ -10,6 +10,8 @@
 import type { CommandDef, Shell, ValueHint } from './types.js';
 import { possibleValues, subCommandsOf } from './parser.js';
 
+export type { Shell, ValueHint } from './types.js';
+
 // ---- Internal: Command Tree Traversal ----
 
 interface FlagInfo {
@@ -846,8 +848,8 @@ export function withCompletions(rootCommand: CommandDef<any>): CommandDef<any> {
         valueParser: [...VALID_SHELLS],
       },
     },
-    run({ args }) {
-      process.stdout.write(generateCompletions(rootCommand, String(args['shell']) as Shell));
+    run({ args, stdout }) {
+      stdout.write(generateCompletions(rootCommand, String(args['shell']) as Shell));
     },
   };
 
