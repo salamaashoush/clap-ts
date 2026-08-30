@@ -377,9 +377,20 @@ describe('color choice', () => {
     expect(renderHelp(c)).not.toBe(stripAnsi(renderHelp(c)));
   });
 
-  test("'auto' follows stream detection, which is off under the test runner", () => {
-    const c: CommandDef = { meta: { name: 'x', color: 'auto' }, args };
-    expect(renderHelp(c)).toBe(stripAnsi(renderHelp(c)));
+  test("'auto' is the default, and defers to stream detection", () => {
+    // Asserting whether detection says yes here would pin the test to the
+    // runner: bun 1.2 and bun 1.4 disagree about a piped stdout. The contract
+    // is that 'auto' behaves exactly as setting nothing does.
+    const auto: CommandDef = { meta: { name: 'x', color: 'auto' }, args };
+    const unset: CommandDef = { meta: { name: 'x' }, args };
+    expect(renderHelp(auto)).toBe(renderHelp(unset));
+  });
+
+  test("'never' and 'always' both override detection, whichever way it went", () => {
+    const never: CommandDef = { meta: { name: 'x', color: 'never' }, args };
+    const always: CommandDef = { meta: { name: 'x', color: 'always' }, args };
+    expect(renderHelp(never)).not.toBe(renderHelp(always));
+    expect(stripAnsi(renderHelp(always))).toBe(renderHelp(never));
   });
 });
 
