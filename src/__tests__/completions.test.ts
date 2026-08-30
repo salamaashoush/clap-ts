@@ -331,7 +331,8 @@ describe('withCompletions', () => {
     }) as typeof process.exit;
 
     try {
-      await runMain(withCompletions(root), { argv: ['completions', 'invalid'], exit: false });
+      // Not exit:false here: the point is that an unknown shell exits 2.
+      await runMain(withCompletions(root), { argv: ['completions', 'invalid'] });
     } catch {
       // expected from mocked process.exit
     } finally {
@@ -339,7 +340,8 @@ describe('withCompletions', () => {
       process.exit = originalExit;
     }
 
-    expect(errOutput).toContain("invalid shell 'invalid'");
+    expect(errOutput).toContain("invalid value 'invalid' for '<SHELL>'");
+    expect(errOutput).toContain('[possible values: bash, zsh, fish, powershell, elvish, nushell]');
     expect(exitCode).toBe(2);
   });
 

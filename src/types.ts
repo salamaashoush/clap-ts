@@ -454,6 +454,16 @@ export interface ManOptions {
   readonly manual?: string;
 }
 
+/** Options for markdown documentation output. */
+export interface MarkdownOptions {
+  /** Command name used in headings and usage; defaults to binName or name. */
+  readonly name?: string;
+  /** Document title rendered above the command, as a level-1 heading. */
+  readonly title?: string;
+  /** Text appended after the last command section. */
+  readonly footer?: string;
+}
+
 // ---- Options ----
 
 /** Options for runMain / runCommand. */

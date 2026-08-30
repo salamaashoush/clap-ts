@@ -26,6 +26,7 @@ export type {
   CommandDef,
   RunOptions,
   ManOptions,
+  MarkdownOptions,
   ParseResult,
   InferArgValue,
   InferArgOptional,
@@ -54,3 +55,6 @@ export { generateCompletions, withCompletions } from './completions.js';
 
 // Man pages
 export { renderManPage, generateManPages } from './man.js';
+
+// Markdown documentation
+export { renderMarkdownHelp } from './markdown.js';

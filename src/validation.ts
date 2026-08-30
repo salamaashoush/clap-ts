@@ -379,6 +379,9 @@ function validateValueParser(
 
     const ignoreCase = def.ignoreCase === true;
     const valueName = def.valueName ?? longName.toUpperCase();
+    // A positional has no flag to name, so it is shown as just its placeholder.
+    const target =
+      def.type === 'positional' ? `<${valueName}>` : `--${longName} <${valueName}>`;
     const values = Array.isArray(value) ? value : [String(value)];
     for (const v of values) {
       if (!possible.some((candidate) => matchesPossibleValue(candidate, v, ignoreCase))) {
@@ -387,7 +390,7 @@ function validateValueParser(
           .map((candidate) => candidate.name)
           .join(', ');
         throw new CliParseError(
-          `invalid value '${v}' for '--${longName} <${valueName}>'\n  [possible values: ${possibleStr}]`,
+          `invalid value '${v}' for '${target}'\n  [possible values: ${possibleStr}]`,
         );
       }
     }

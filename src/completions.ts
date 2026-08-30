@@ -807,7 +807,14 @@ export function generateCompletions(
 
 // ---- Public API: Auto-inject completions subcommand ----
 
-const VALID_SHELLS: readonly Shell[] = ['bash', 'zsh', 'fish', 'powershell'];
+const VALID_SHELLS: readonly Shell[] = [
+  'bash',
+  'zsh',
+  'fish',
+  'powershell',
+  'elvish',
+  'nushell',
+];
 
 /**
  * Return a new command with a `completions` subcommand auto-injected.
@@ -835,18 +842,12 @@ export function withCompletions(rootCommand: CommandDef<any>): CommandDef<any> {
         type: 'positional' as const,
         valueName: 'SHELL',
         required: true,
-        description: 'Target shell: bash, zsh, fish, or powershell',
+        description: `Target shell: ${VALID_SHELLS.join(', ')}`,
+        valueParser: [...VALID_SHELLS],
       },
     },
     run({ args }) {
-      const shell = String(args['shell']);
-      if (!VALID_SHELLS.includes(shell as Shell)) {
-        process.stderr.write(
-          `error: invalid shell '${shell}'. Valid options: ${VALID_SHELLS.join(', ')}\n`,
-        );
-        process.exit(2);
-      }
-      process.stdout.write(generateCompletions(rootCommand, shell as Shell));
+      process.stdout.write(generateCompletions(rootCommand, String(args['shell']) as Shell));
     },
   };
 
