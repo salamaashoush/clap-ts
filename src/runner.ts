@@ -75,116 +75,18 @@ export function defineArg<const T extends ArgDef>(arg: T): T {
   return arg;
 }
 
-// ---- Subcommand Resolution ----
+// ---- Global Args ----
 
 /**
- * Find a subcommand by prefix matching (inferSubcommands).
- * Returns the match if exactly one, 'ambiguous' if multiple, undefined if none.
+ * Overlay inherited global args onto a command. The command's own args win, and
+ * a command with nothing to inherit is returned untouched so the parser's spec
+ * cache still hits.
  */
-function findSubcommandByPrefix(
-  subCommands: Record<string, CommandDef>,
-  token: string,
-): { name: string; def: CommandDef } | 'ambiguous' | undefined {
-  const matches: { name: string; def: CommandDef }[] = [];
-  for (const [name, def] of Object.entries(subCommands)) {
-    if (name.startsWith(token)) {
-      matches.push({ name, def });
-    } else if (def.meta.aliases?.some((a) => a.startsWith(token))) {
-      matches.push({ name, def });
-    }
+function applyGlobals(command: CommandDef, globals: ArgsDef): CommandDef {
+  for (const _key in globals) {
+    return { ...command, args: mergeGlobalArgs(globals, command.args ?? {}) };
   }
-  if (matches.length === 1) {
-    return matches[0];
-  }
-  if (matches.length > 1) {
-    return 'ambiguous';
-  }
-  return undefined;
-}
-
-/**
- * Resolve the command chain from the root command and raw args.
- * Supports inferSubcommands for prefix matching.
- */
-function resolveCommandChain(
-  rootCommand: CommandDef,
-  rawArgs: readonly string[],
-): {
-  command: CommandDef;
-  remainingArgs: string[];
-  parentNames: string[];
-  externalSubcommand?: string;
-} {
-  let current = rootCommand;
-  const parentNames: string[] = [];
-  const remaining = [...rawArgs];
-
-  while (remaining.length > 0 && (current.subCommands || current.meta.allowExternalSubcommands)) {
-    const token = remaining[0]!;
-
-    // Don't interpret flags as subcommands
-    if (token.startsWith('-')) {
-      break;
-    }
-
-    // Direct match
-    if (current.subCommands) {
-      const subCmd = current.subCommands[token];
-      if (subCmd) {
-        parentNames.push(current.meta.name);
-        current = subCmd;
-        remaining.shift();
-        continue;
-      }
-
-      // Alias match
-      const aliasMatch = findSubcommandByAlias(current.subCommands, token);
-      if (aliasMatch) {
-        parentNames.push(current.meta.name);
-        current = aliasMatch;
-        remaining.shift();
-        continue;
-      }
-
-      // inferSubcommands: try prefix matching
-      if (current.meta.inferSubcommands) {
-        const prefixMatch = findSubcommandByPrefix(current.subCommands, token);
-        if (prefixMatch === 'ambiguous') {
-          break;
-        }
-        if (prefixMatch) {
-          parentNames.push(current.meta.name);
-          current = prefixMatch.def;
-          remaining.shift();
-          continue;
-        }
-      }
-    }
-
-    // allowExternalSubcommands: accept unknown subcommand and stop
-    if (current.meta.allowExternalSubcommands) {
-      remaining.shift();
-      return { command: current, remainingArgs: remaining, parentNames, externalSubcommand: token };
-    }
-
-    // Not a subcommand, stop resolution
-    break;
-  }
-
-  return { command: current, remainingArgs: remaining, parentNames };
-}
-
-/** Find a subcommand definition by alias. */
-function findSubcommandByAlias(
-  subCommands: Record<string, CommandDef>,
-  token: string,
-): CommandDef | undefined {
-  for (const def of Object.values(subCommands)) {
-    if (def.meta.aliases?.includes(token)) {
-      return def;
-    }
-  }
-  return undefined;
+  return command;
 }
 
 // ---- runCommand ----
@@ -356,35 +258,91 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
   const showHelpOnEmpty = opts?.showHelpOnEmpty !== false;
   const styles = opts?.styles;
 
+  // Tracked through the descent so an error names the command that failed,
+  // not the root.
+  let errorCommand: CommandDef = rootCommand;
+  let errorParents: string[] = [];
+
   try {
     const rawArgs = getRawArgs(opts?.argv);
 
-    // Resolve subcommand chain (with inferSubcommands and allowExternalSubcommands)
-    const { command, remainingArgs, parentNames, externalSubcommand } =
-      resolveCommandChain(rootCommand, rawArgs);
+    let command: CommandDef = rootCommand;
+    let effectiveCommand: CommandDef = rootCommand;
+    let inheritedGlobals: ArgsDef = {};
+    let argv: readonly string[] = rawArgs;
+    const parentNames: string[] = [];
+    let parseResult = parseArgs([], rootCommand);
+    let externalSubcommand: string | undefined;
 
-    // Handle external subcommand: pass to parent command's run handler
-    if (externalSubcommand) {
-      if (command.run) {
+    // Descend the subcommand chain one level at a time, parsing as we go: only
+    // the arg spec can say whether a bare token is a subcommand or the value of
+    // a preceding flag.
+    for (;;) {
+      inheritedGlobals = mergeGlobalArgs(inheritedGlobals, collectGlobalArgs(command));
+      effectiveCommand = applyGlobals(command, inheritedGlobals);
+      errorCommand = effectiveCommand;
+      errorParents = [...parentNames];
+
+      parseResult = parseArgs(argv, effectiveCommand);
+
+      if (
+        parseResult.subCommand === undefined ||
+        parseResult.helpRequested ||
+        parseResult.versionRequested
+      ) {
+        break;
+      }
+
+      if (parseResult.subCommandIsExternal) {
+        externalSubcommand = parseResult.subCommand;
+        break;
+      }
+
+      if (command.meta.argsConflictsWithSubcommands && parseResult.explicitlySet.size > 0) {
+        showError(
+          'arguments cannot be used with subcommands',
+          effectiveCommand,
+          parentNames.length > 0 ? parentNames : undefined,
+          styles,
+        );
+        if (shouldExit) {
+          process.exit(2);
+        }
+        return;
+      }
+
+      const next = command.subCommands?.[parseResult.subCommand];
+      if (next === undefined) {
+        break;
+      }
+
+      // A parent's own constraints still apply to the flags given before the
+      // subcommand, unless it opted out with subcommandNegatesReqs.
+      if (!command.meta.subcommandNegatesReqs) {
+        validate(parseResult, effectiveCommand);
+      }
+
+      parentNames.push(command.meta.name);
+      command = next;
+      argv = parseResult.subCommandArgs;
+    }
+
+    // External subcommand: hand the name and the untouched remainder to the
+    // command that declared allowExternalSubcommands.
+    if (externalSubcommand !== undefined) {
+      if (effectiveCommand.run) {
         await runCommand(
-          command,
-          { } as ParsedArgs<ArgsDef>,
-          remainingArgs,
+          effectiveCommand,
+          parseResult.args as ParsedArgs<ArgsDef>,
+          parseResult.subCommandArgs,
           externalSubcommand,
         );
       }
+      if (shouldExit) {
+        process.exit(0);
+      }
       return;
     }
-
-    // Merge global args from parent into resolved command
-    const globalArgs = collectGlobalArgs(rootCommand);
-    const effectiveCommand: CommandDef = {
-      ...command,
-      args: command.args ? mergeGlobalArgs(globalArgs, command.args) : globalArgs,
-    };
-
-    // Parse remaining args against the resolved command
-    const parseResult = parseArgs(remainingArgs, effectiveCommand);
 
     // Handle --help
     if (parseResult.helpRequested) {
@@ -411,7 +369,7 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
 
     // argRequiredElseHelp: show help if no args were explicitly provided
     if (command.meta.argRequiredElseHelp && parseResult.explicitlySet.size === 0) {
-      handleHelpRequest(command, parentNames, shouldExit, false, styles);
+      handleHelpRequest(effectiveCommand, parentNames, shouldExit, false, styles);
       return;
     }
 
@@ -427,10 +385,10 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
       if (command.meta.subcommandRequired) {
         if (parseResult.positionals.length > 0) {
           handleUnrecognizedSubcommand(
-            parseResult.positionals[0]!, command, parentNames, shouldExit, styles,
+            parseResult.positionals[0]!, effectiveCommand, parentNames, shouldExit, styles,
           );
         } else {
-          showError("a subcommand is required but one was not provided", command,
+          showError("a subcommand is required but one was not provided", effectiveCommand,
             parentNames.length > 0 ? parentNames : undefined, styles);
           if (shouldExit) {
             process.exit(2);
@@ -441,30 +399,12 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
 
       if (parseResult.positionals.length > 0) {
         handleUnrecognizedSubcommand(
-          parseResult.positionals[0]!, command, parentNames, shouldExit, styles,
+          parseResult.positionals[0]!, effectiveCommand, parentNames, shouldExit, styles,
         );
         return;
       }
 
-      handleHelpRequest(command, parentNames, shouldExit, false, styles);
-      return;
-    }
-
-    // argsConflictsWithSubcommands: error if args + subcommand both present
-    if (
-      command.meta.argsConflictsWithSubcommands &&
-      parseResult.subCommand &&
-      parseResult.explicitlySet.size > 0
-    ) {
-      showError(
-        "arguments cannot be used with subcommands",
-        command,
-        parentNames.length > 0 ? parentNames : undefined,
-        styles,
-      );
-      if (shouldExit) {
-        process.exit(2);
-      }
+      handleHelpRequest(effectiveCommand, parentNames, shouldExit, false, styles);
       return;
     }
 
@@ -483,7 +423,7 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
     }
   } catch (error) {
     if (error instanceof CliParseError) {
-      showError(error.message, rootCommand, undefined, styles);
+      showError(error.message, errorCommand, errorParents.length > 0 ? errorParents : undefined, styles);
       if (shouldExit) {
         process.exit(2);
       }

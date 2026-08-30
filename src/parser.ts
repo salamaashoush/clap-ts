@@ -1,27 +1,37 @@
 /**
- * Argument parser - delegates core tokenizing to node:util parseArgs,
- * then layers on: env fallback, type coercion, count/append actions,
- * numArgs with defaultMissingValue, global args, kebab-to-camel mapping,
- * subcommand detection, and default values.
+ * Argument parser.
  *
- * node:util parseArgs handles:
- *   --flag, --flag=value, --flag value, -f, -fvalue, -abc (combined booleans),
- *   -- separator, positionals
+ * Tokenizes argv directly against the command's own arg definitions. This
+ * replaced node:util parseArgs, which re-validates its entire `options` object
+ * on every call (~170ns per option, regardless of argv length) and cannot
+ * express multi-value options, value terminators, or subcommand boundaries.
  *
- * We handle on top:
- *   conflictsWith / requires (in validation.ts),
- *   env variable fallback, action: 'append' (via multiple:true), action: 'count',
- *   numArgs with defaultMissingValue, global args merge, valueParser enum validation
- *   (in validation.ts), number type coercion, kebab-to-camel mapping,
- *   required arg validation (in validation.ts), typo suggestions (in validation.ts),
- *   valueDelimiter splitting, function valueParser, trailingVarArg, last,
- *   allowHyphenValues, allowNegativeNumbers, inferLongArgs, defaultValueIf.
+ * Handled here: long/short/clustered flags, attached and `=` values, boolean
+ * negation, count and append actions, multi-token numArgs, optional values via
+ * defaultMissingValue, value delimiters, hyphen and negative-number values,
+ * positional assignment, trailing var args, `--` escape, subcommand
+ * boundaries, env fallback, conditional and static defaults, and
+ * kebab-to-camel key mapping.
+ *
+ * Constraint checks that need the whole picture (conflicts, requires, groups,
+ * possible values) live in validation.ts.
  */
 
-import { parseArgs as nodeParseArgs } from 'node:util';
 import type { ArgDef, ArgsDef, ParseResult, CommandDef } from './types.js';
 
+// ---- Error ----
+
+export class CliParseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CliParseError';
+  }
+}
+
 // ---- Helpers ----
+
+const HYPHEN = 45;
+const NEGATIVE_NUMBER = /^-\d/;
 
 /** Convert kebab-case to camelCase: --config-path -> configPath */
 function kebabToCamel(s: string): string {
@@ -39,313 +49,198 @@ export function getRawArgs(argv?: readonly string[]): string[] {
   return source.slice(2);
 }
 
-// ---- Error ----
-
-export class CliParseError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'CliParseError';
-  }
+function readEnv(name: string): string | undefined {
+  return globalThis.Bun === undefined
+    ? process.env[name]
+    : (globalThis.Bun as { env: Record<string, string | undefined> }).env[name];
 }
 
-// ---- Internal Types ----
-
-interface FlagEntry {
-  key: string;
-  def: ArgDef;
-  negated: boolean;
-}
-
-// ---- Flag Lookup Maps ----
+// ---- Compiled Spec ----
 
 /**
- * Build lookup maps from all possible flag forms to the canonical arg name.
- * Used for post-processing parseArgs output back to our ArgDef keys.
- * Registers both hidden aliases and visible aliases.
+ * An arg definition flattened into the shape the tokenizer needs, so the hot
+ * loop never re-derives `long ?? key`, value counts, or action booleans.
  */
-function buildFlagMaps(argsDef: ArgsDef): {
-  longMap: Map<string, FlagEntry>;
-  shortMap: Map<string, { key: string; def: ArgDef }>;
-  hasHyphenOrNegative: boolean;
-} {
-  const longMap = new Map<string, FlagEntry>();
-  const shortMap = new Map<string, { key: string; def: ArgDef }>();
-  let hasHyphenOrNegative = false;
-
-  for (const [key, def] of Object.entries(argsDef)) {
-    const longName = def.long ?? key;
-    longMap.set(longName, { key, def, negated: false });
-
-    if (def.type === 'boolean') {
-      longMap.set(`no-${longName}`, { key, def, negated: true });
-    }
-
-    if (def.allowHyphenValues || def.allowNegativeNumbers) {
-      hasHyphenOrNegative = true;
-    }
-
-    // Register hidden aliases
-    if (def.alias) {
-      for (const alias of def.alias) {
-        if (alias.length === 1) {
-          shortMap.set(alias, { key, def });
-        } else {
-          longMap.set(alias, { key, def, negated: false });
-        }
-      }
-    }
-
-    // Register visible aliases (also work as real aliases at parse time)
-    if (def.visibleAlias) {
-      for (const alias of def.visibleAlias) {
-        if (alias.length === 1) {
-          shortMap.set(alias, { key, def });
-        } else {
-          longMap.set(alias, { key, def, negated: false });
-        }
-      }
-    }
-
-    if (def.short && def.short.length === 1) {
-      shortMap.set(def.short, { key, def });
-    }
-  }
-
-  return { longMap, shortMap, hasHyphenOrNegative };
+interface ArgSpec {
+  readonly key: string;
+  readonly def: ArgDef;
+  readonly long: string;
+  readonly isBool: boolean;
+  readonly isCount: boolean;
+  readonly isAppend: boolean;
+  /** Minimum values this arg consumes per occurrence. */
+  readonly min: number;
+  /** Maximum values this arg consumes per occurrence. */
+  readonly max: number;
+  /** camelCase form of `key`, precomputed so parsing never re-runs the regex. */
+  readonly camel: string;
+  /** Built-in flag this spec stands for, if any. */
+  readonly builtin?: 'help' | 'version';
 }
 
-// ---- Build parseArgs options config ----
+interface LongEntry {
+  readonly spec: ArgSpec;
+  readonly negated: boolean;
+}
 
-/**
- * Build the `options` config that node:util parseArgs expects from our ArgDef definitions.
- */
-function buildParseArgsOptions(argsDef: ArgsDef): {
-  options: Record<string, { type: 'string' | 'boolean'; short?: string; multiple?: boolean }>;
-  optionalValueFlags: Set<string>;
-} {
-  const options: Record<
-    string,
-    { type: 'string' | 'boolean'; short?: string; multiple?: boolean }
-  > = {};
-  const optionalValueFlags = new Set<string>();
+interface CommandSpec {
+  readonly longs: Map<string, LongEntry>;
+  readonly shorts: Map<string, ArgSpec>;
+  readonly positionals: readonly ArgSpec[];
+  /** Every declared arg, in declaration order, for the fallback and key passes. */
+  readonly all: readonly ArgSpec[];
+  /** Subcommand name or alias -> canonical name. Undefined when there are none. */
+  readonly subcommands: Map<string, string> | undefined;
+  readonly inferSubcommands: boolean;
+  readonly allowExternal: boolean;
+  /** Any arg accepts negative numbers, so `-5` may be a value rather than a flag. */
+  readonly allowsNegative: boolean;
+  readonly inferLong: boolean;
+}
 
-  for (const [key, def] of Object.entries(argsDef)) {
-    if (def.type === 'positional') {
-      continue;
-    }
+const specCache = new WeakMap<CommandDef, CommandSpec>();
 
-    const longName = def.long ?? key;
+function valueCounts(def: ArgDef): { min: number; max: number } {
+  if (def.numArgs) {
+    return { min: def.numArgs.min, max: def.numArgs.max };
+  }
+  if (def.type === 'boolean' || def.action === 'count') {
+    return { min: 0, max: 0 };
+  }
+  return { min: 1, max: 1 };
+}
 
-    if (def.action === 'count') {
-      options[longName] = { type: 'boolean', multiple: true };
-    } else if (def.type === 'boolean') {
-      options[longName] = { type: 'boolean' };
-      options[`no-${longName}`] = { type: 'boolean' };
-    } else if (def.action === 'append') {
-      options[longName] = { type: 'string', multiple: true };
+function makeSpec(key: string, def: ArgDef): ArgSpec {
+  const { min, max } = valueCounts(def);
+  return {
+    key,
+    def,
+    long: def.long ?? key,
+    camel: kebabToCamel(key),
+    isBool: def.type === 'boolean' && def.action !== 'count',
+    isCount: def.action === 'count',
+    isAppend: def.action === 'append',
+    min,
+    max,
+  };
+}
+
+function registerAliases(
+  aliases: readonly string[] | undefined,
+  spec: ArgSpec,
+  longs: Map<string, LongEntry>,
+  shorts: Map<string, ArgSpec>,
+): void {
+  if (!aliases) {
+    return;
+  }
+  for (const alias of aliases) {
+    if (alias.length === 1) {
+      shorts.set(alias, spec);
     } else {
-      options[longName] = { type: 'string' };
+      longs.set(alias, { spec, negated: false });
+    }
+  }
+}
+
+function buildSpec(command: CommandDef): CommandSpec {
+  const argsDef: ArgsDef = command.args ?? {};
+  const longs = new Map<string, LongEntry>();
+  const shorts = new Map<string, ArgSpec>();
+  const positionals: ArgSpec[] = [];
+  const all: ArgSpec[] = [];
+  let allowsNegative = false;
+
+  for (const key of Object.keys(argsDef)) {
+    const def = argsDef[key]!;
+
+    if (def.allowNegativeNumbers) {
+      allowsNegative = true;
     }
 
-    if (def.numArgs && def.numArgs.min === 0 && def.type !== 'boolean') {
-      optionalValueFlags.add(longName);
+    const spec = makeSpec(key, def);
+    all.push(spec);
+
+    if (def.type === 'positional') {
+      positionals.push(spec);
+      continue;
     }
 
+    longs.set(spec.long, { spec, negated: false });
+    if (spec.isBool) {
+      longs.set(`no-${spec.long}`, { spec, negated: true });
+    }
     if (def.short && def.short.length === 1) {
-      options[longName].short = def.short;
+      shorts.set(def.short, spec);
     }
-
-    // Register hidden and visible aliases
-    const registerAliases = (aliases: readonly string[]) => {
-      const opt = options[longName]!;
-      for (const alias of aliases) {
-        if (alias.length > 1 || opt.short) {
-          options[alias] = { type: opt.type, multiple: opt.multiple };
-        } else {
-          opt.short = alias;
-        }
-      }
-    };
-
-    if (def.alias) {
-      registerAliases(def.alias);
-    }
-    if (def.visibleAlias) {
-      registerAliases(def.visibleAlias);
-    }
+    registerAliases(def.alias, spec, longs, shorts);
+    registerAliases(def.visibleAlias, spec, longs, shorts);
   }
 
-  // Built-in flags
-  options['help'] = { type: 'boolean', short: 'h' };
-  options['version'] = { type: 'boolean', short: 'V' };
-
-  return { options, optionalValueFlags };
-}
-
-// ---- Pre-scan / Preprocessing ----
-
-/** Check if the next token looks like a flag (not a value). */
-function isNextTokenAFlag(nextToken: string | undefined): boolean {
-  return (
-    nextToken === undefined ||
-    (nextToken.startsWith('-') && nextToken !== '-' && nextToken !== '--')
-  );
-}
-
-/** Check if a token looks like a negative number (e.g., -1, -3.14, -0). */
-function looksLikeNegativeNumber(token: string): boolean {
-  return /^-\d/.test(token);
-}
-
-/** Try to match a long flag token as an optional-value flag without a value. */
-function tryStripOptionalLong(
-  token: string,
-  nextToken: string | undefined,
-  optionalValueFlags: Set<string>,
-  longMap: Map<string, FlagEntry>,
-): { key: string; defaultVal: string | number | boolean } | undefined {
-  if (!token.startsWith('--') || token.length <= 2 || token.includes('=')) {
-    return undefined;
+  // Built-in flags never displace a user-defined arg of the same name.
+  const helpSpec: ArgSpec = {
+    key: 'help', def: { type: 'boolean' }, long: 'help', camel: 'help',
+    isBool: true, isCount: false, isAppend: false, min: 0, max: 0, builtin: 'help',
+  };
+  const versionSpec: ArgSpec = {
+    key: 'version', def: { type: 'boolean' }, long: 'version', camel: 'version',
+    isBool: true, isCount: false, isAppend: false, min: 0, max: 0, builtin: 'version',
+  };
+  if (!longs.has('help')) {
+    longs.set('help', { spec: helpSpec, negated: false });
   }
-  const flagName = token.slice(2);
-  if (!optionalValueFlags.has(flagName) || !isNextTokenAFlag(nextToken)) {
-    return undefined;
+  if (!longs.has('version')) {
+    longs.set('version', { spec: versionSpec, negated: false });
   }
-  const entry = longMap.get(flagName);
-  if (!entry) {
-    return undefined;
+  if (!shorts.has('h')) {
+    shorts.set('h', helpSpec);
   }
-  return { key: entry.key, defaultVal: entry.def.defaultMissingValue ?? true };
-}
-
-/** Try to match a short flag token as an optional-value flag without a value. */
-function tryStripOptionalShort(
-  token: string,
-  nextToken: string | undefined,
-  optionalValueFlags: Set<string>,
-  shortMap: Map<string, { key: string; def: ArgDef }>,
-): { key: string; defaultVal: string | number | boolean } | undefined {
-  if (!token.startsWith('-') || token.length !== 2 || token[1] === '-') {
-    return undefined;
-  }
-  const c = token[1]!;
-  const entry = shortMap.get(c);
-  if (!entry) {
-    return undefined;
-  }
-  const entryLong = entry.def.long ?? entry.key;
-  if (!optionalValueFlags.has(entryLong) || !isNextTokenAFlag(nextToken)) {
-    return undefined;
-  }
-  return { key: entry.key, defaultVal: entry.def.defaultMissingValue ?? true };
-}
-
-/**
- * Resolve a flag token to its key and ArgDef, checking both long and short maps.
- * Returns the canonical key (used as fallback long name) and the def.
- */
-function resolveFlag(
-  token: string,
-  longMap: Map<string, FlagEntry>,
-  shortMap: Map<string, { key: string; def: ArgDef }>,
-): { key: string; def: ArgDef } | undefined {
-  if (token.startsWith('--') && token.length > 2) {
-    const flagName = token.includes('=') ? token.slice(2, token.indexOf('=')) : token.slice(2);
-    const entry = longMap.get(flagName);
-    return entry ? { key: entry.key, def: entry.def } : undefined;
-  }
-  if (token.startsWith('-') && token.length === 2 && token[1] !== '-') {
-    return shortMap.get(token[1]!) ?? undefined;
-  }
-  return undefined;
-}
-
-/**
- * Pre-process raw args before passing to node:util parseArgs.
- * Handles:
- * 1. Optional-value flags (strip bare flags, record defaults)
- * 2. allowHyphenValues / allowNegativeNumbers (rewrite --flag -value to --flag=-value)
- */
-function preprocessArgs(
-  rawArgs: readonly string[],
-  optionalValueFlags: Set<string>,
-  longMap: Map<string, FlagEntry>,
-  shortMap: Map<string, { key: string; def: ArgDef }>,
-  hasHyphenOrNegative: boolean,
-): { processedArgs: string[]; optionalDefaults: Map<string, string | number | boolean> } {
-  if (optionalValueFlags.size === 0 && !hasHyphenOrNegative) {
-    return { processedArgs: [...rawArgs], optionalDefaults: new Map() };
+  if (!shorts.has('V')) {
+    shorts.set('V', versionSpec);
   }
 
-  const optionalDefaults = new Map<string, string | number | boolean>();
-  const processedArgs: string[] = [];
-  let stopParsing = false;
-
-  for (let i = 0; i < rawArgs.length; i++) {
-    const token = rawArgs[i]!;
-
-    if (stopParsing || token === '--') {
-      if (token === '--') {
-        stopParsing = true;
-      }
-      processedArgs.push(token);
-      continue;
-    }
-
-    const nextToken = rawArgs[i + 1];
-
-    // Optional-value flag handling (long)
-    const stripped = tryStripOptionalLong(token, nextToken, optionalValueFlags, longMap);
-    if (stripped) {
-      optionalDefaults.set(stripped.key, stripped.defaultVal);
-      continue;
-    }
-
-    // Optional-value flag handling (short)
-    const strippedShort = tryStripOptionalShort(
-      token,
-      nextToken,
-      optionalValueFlags,
-      shortMap,
-    );
-    if (strippedShort) {
-      optionalDefaults.set(strippedShort.key, strippedShort.defaultVal);
-      continue;
-    }
-
-    // allowHyphenValues / allowNegativeNumbers:
-    // If this token is a known flag and the next token starts with - but the flag's
-    // def allows hyphen values or negative numbers, rewrite to --flag=-value
-    if (nextToken && nextToken.startsWith('-') && nextToken !== '-' && nextToken !== '--') {
-      const resolved = resolveFlag(token, longMap, shortMap);
-      if (resolved && resolved.def.type !== 'boolean' && resolved.def.type !== 'positional') {
-        const shouldRewrite =
-          resolved.def.allowHyphenValues ||
-          (resolved.def.allowNegativeNumbers && looksLikeNegativeNumber(nextToken));
-        if (shouldRewrite && !token.includes('=')) {
-          // Rewrite to --longName=value form so node:util parseArgs treats it as a value
-          const longName = resolved.def.long ?? resolved.key;
-          processedArgs.push(`--${longName}=${nextToken}`);
-          i++; // skip the next token (consumed as value)
-          continue;
+  let subcommands: Map<string, string> | undefined;
+  if (command.subCommands) {
+    subcommands = new Map();
+    for (const name of Object.keys(command.subCommands)) {
+      subcommands.set(name, name);
+      const { aliases } = command.subCommands[name]!.meta;
+      if (aliases) {
+        for (const alias of aliases) {
+          subcommands.set(alias, name);
         }
       }
     }
-
-    processedArgs.push(token);
   }
 
-  return { processedArgs, optionalDefaults };
+  return {
+    longs,
+    shorts,
+    positionals,
+    all,
+    subcommands,
+    inferSubcommands: command.meta.inferSubcommands === true,
+    allowExternal: command.meta.allowExternalSubcommands === true,
+    allowsNegative,
+    inferLong: command.meta.inferLongArgs === true,
+  };
 }
 
-// ---- Coerce Value ----
+function getSpec(command: CommandDef): CommandSpec {
+  let spec = specCache.get(command);
+  if (spec === undefined) {
+    spec = buildSpec(command);
+    specCache.set(command, spec);
+  }
+  return spec;
+}
+
+// ---- Value Coercion ----
 
 function coerceValue(value: string, def: ArgDef, argName: string): string | number | boolean {
-  // If a function valueParser is defined, use it for coercion
   if (typeof def.valueParser === 'function') {
     try {
       const parsed = def.valueParser(value);
-      // Ensure the result is a valid ParseResult value type
       if (
         typeof parsed === 'string' ||
         typeof parsed === 'number' ||
@@ -368,7 +263,9 @@ function coerceValue(value: string, def: ArgDef, argName: string): string | numb
     case 'number': {
       const num = value.includes('.') ? Number.parseFloat(value) : Number.parseInt(value, 10);
       if (Number.isNaN(num) || !Number.isFinite(num)) {
-        throw new CliParseError(`invalid value '${value}' for '${argName}': expected a finite number`);
+        throw new CliParseError(
+          `invalid value '${value}' for '${argName}': expected a finite number`,
+        );
       }
       return num;
     }
@@ -380,278 +277,358 @@ function coerceValue(value: string, def: ArgDef, argName: string): string | numb
   }
 }
 
-// ---- Subcommand Detection ----
+/** Human-readable name for this arg in error messages. */
+function displayName(spec: ArgSpec): string {
+  return spec.def.type === 'positional' ? `<${spec.def.valueName ?? spec.key}>` : `--${spec.long}`;
+}
 
-/**
- * Build a lookup map from subcommand names and aliases to canonical names.
- * Used for O(1) subcommand detection.
- */
-function buildSubcommandMap(
-  subCommands: Record<string, CommandDef>,
-): Map<string, string> {
-  const map = new Map<string, string>();
-  for (const [name, def] of Object.entries(subCommands)) {
-    map.set(name, name);
-    if (def.meta.aliases) {
-      for (const alias of def.meta.aliases) {
-        map.set(alias, name);
-      }
-    }
+// ---- Tokenizer State ----
+
+interface ParseState {
+  readonly result: Record<string, string | number | boolean | string[]>;
+  readonly explicitlySet: Set<string>;
+  readonly unknown: string[];
+  readonly positionals: string[];
+  readonly rest: string[];
+  helpRequested: boolean;
+  helpIsShort: boolean;
+  versionRequested: boolean;
+  subCommand?: string;
+  subCommandIsExternal: boolean;
+  subCommandArgs: readonly string[];
+}
+
+/** Whether a token can serve as a value for this arg rather than starting a new flag. */
+function isValueToken(token: string, spec: ArgSpec, allowsNegative: boolean): boolean {
+  if (token.length === 0 || token.charCodeAt(0) !== HYPHEN) {
+    return true;
   }
-  return map;
+  if (token === '-') {
+    return true;
+  }
+  if (token === '--') {
+    return false;
+  }
+  if (spec.def.allowHyphenValues) {
+    return true;
+  }
+  return (
+    (spec.def.allowNegativeNumbers || allowsNegative) && NEGATIVE_NUMBER.test(token)
+  );
+}
+
+/** Record a flag occurrence that carries no value: booleans and counts. */
+function applyFlagOnly(spec: ArgSpec, negated: boolean, state: ParseState): void {
+  if (spec.builtin === 'help') {
+    state.helpRequested = true;
+    return;
+  }
+  if (spec.builtin === 'version') {
+    state.versionRequested = true;
+    return;
+  }
+  if (spec.isCount) {
+    const previous = state.result[spec.key];
+    state.result[spec.key] = (typeof previous === 'number' ? previous : 0) + 1;
+  } else {
+    state.result[spec.key] = !negated;
+  }
+  state.explicitlySet.add(spec.key);
+}
+
+/** Store one or more parsed values for an arg, honouring the append action. */
+function applyValues(spec: ArgSpec, values: string[], state: ParseState): void {
+  const name = displayName(spec);
+
+  if (spec.isAppend) {
+    const previous = state.result[spec.key];
+    const list = Array.isArray(previous) ? previous : [];
+    for (const value of values) {
+      list.push(String(coerceValue(value, spec.def, name)));
+    }
+    state.result[spec.key] = list;
+  } else if (values.length > 1) {
+    state.result[spec.key] = values.map((v) => String(coerceValue(v, spec.def, name)));
+  } else {
+    state.result[spec.key] = coerceValue(values[0]!, spec.def, name);
+  }
+
+  state.explicitlySet.add(spec.key);
+}
+
+/** Apply defaultMissingValue for a flag whose value was omitted (numArgs.min === 0). */
+function applyMissingValue(spec: ArgSpec, state: ParseState): void {
+  const fallback = spec.def.defaultMissingValue ?? true;
+  if (spec.isAppend) {
+    const previous = state.result[spec.key];
+    const list = Array.isArray(previous) ? previous : [];
+    list.push(String(fallback));
+    state.result[spec.key] = list;
+  } else {
+    state.result[spec.key] = fallback;
+  }
+  state.explicitlySet.add(spec.key);
 }
 
 /**
- * Scan positionals for a subcommand name or alias using O(1) map lookup.
- * Returns the canonical name and the index in the positionals array.
+ * Consume up to `spec.max` values for a flag starting at argv[from].
+ * Returns the index of the last token consumed.
  */
-function detectSubcommand(
-  positionals: readonly string[],
-  command: CommandDef,
-): { name: string; index: number } | undefined {
-  if (!command.subCommands) {
-    return undefined;
-  }
+function consumeValues(
+  spec: ArgSpec,
+  argv: readonly string[],
+  from: number,
+  cmdSpec: CommandSpec,
+  state: ParseState,
+): number {
+  const values: string[] = [];
+  let i = from;
 
-  const subMap = buildSubcommandMap(command.subCommands);
-  for (let i = 0; i < positionals.length; i++) {
-    const canonical = subMap.get(positionals[i]!);
-    if (canonical) {
-      return { name: canonical, index: i };
-    }
-  }
-  return undefined;
-}
-
-// ---- Separate Rest Args ----
-
-/**
- * parseArgs lumps everything (before and after --) into its `positionals` array.
- * We need to split them into positionals (before --) and rest (after --).
- */
-function splitPositionalsAndRest(
-  rawArgs: readonly string[],
-  parseArgsPositionals: readonly string[],
-): { positionals: string[]; rest: string[] } {
-  let dashDashIdx = -1;
-  for (let i = 0; i < rawArgs.length; i++) {
-    if (rawArgs[i] === '--') {
-      dashDashIdx = i;
+  while (values.length < spec.max && i < argv.length) {
+    const token = argv[i]!;
+    if (spec.def.valueTerminator !== undefined && token === spec.def.valueTerminator) {
+      i++;
       break;
     }
-  }
-
-  if (dashDashIdx === -1) {
-    return { positionals: [...parseArgsPositionals], rest: [] };
-  }
-
-  const restCount = rawArgs.length - dashDashIdx - 1;
-  const totalPositionals = parseArgsPositionals.length;
-  const beforeCount = totalPositionals - restCount;
-
-  return {
-    positionals: parseArgsPositionals.slice(0, Math.max(0, beforeCount)),
-    rest: parseArgsPositionals.slice(Math.max(0, beforeCount)),
-  };
-}
-
-// ---- Infer Long Args ----
-
-/**
- * Try to resolve an unknown long flag by prefix matching.
- * Returns the matched entry if exactly one match, undefined otherwise.
- */
-function tryInferLongArg(
-  flagName: string,
-  longMap: Map<string, FlagEntry>,
-): FlagEntry | undefined {
-  const matches: FlagEntry[] = [];
-  for (const [name, entry] of longMap) {
-    if (name.startsWith(flagName) && !entry.negated) {
-      matches.push(entry);
+    if (!isValueToken(token, spec, cmdSpec.allowsNegative)) {
+      break;
     }
+    values.push(token);
+    i++;
   }
-  return matches.length === 1 ? matches[0] : undefined;
+
+  if (values.length < spec.min) {
+    if (values.length === 0 && spec.min === 0) {
+      applyMissingValue(spec, state);
+      return i - 1;
+    }
+    throw new CliParseError(
+      spec.min === 1
+        ? `a value is required for '${displayName(spec)}' but none was supplied`
+        : `the argument '${displayName(spec)}' requires at least ${String(spec.min)} values but ${String(values.length)} were provided`,
+    );
+  }
+
+  if (values.length === 0) {
+    applyMissingValue(spec, state);
+  } else {
+    applyValues(spec, values, state);
+  }
+  return i - 1;
 }
 
-// ---- Value Delimiter Splitting ----
+/**
+ * Resolve an unknown long flag by unique prefix match (inferLongArgs).
+ * Negated (`--no-x`) entries are excluded so `--n` cannot silently negate.
+ */
+function inferLongEntry(cmdSpec: CommandSpec, name: string): LongEntry | undefined {
+  let match: LongEntry | undefined;
+  for (const [candidate, entry] of cmdSpec.longs) {
+    if (entry.negated || !candidate.startsWith(name)) {
+      continue;
+    }
+    if (match !== undefined) {
+      return undefined;
+    }
+    match = entry;
+  }
+  return match;
+}
 
 /**
- * Split a string value by the delimiter and return as array.
- * Applied after initial parsing for args with valueDelimiter.
+ * Resolve a bare token to a canonical subcommand name, by exact match on the
+ * name or an alias, then by unique prefix when inferSubcommands is on.
  */
+function resolveSubcommand(cmdSpec: CommandSpec, token: string): string | undefined {
+  const map = cmdSpec.subcommands;
+  if (map === undefined) {
+    return undefined;
+  }
+  const exact = map.get(token);
+  if (exact !== undefined) {
+    return exact;
+  }
+  if (!cmdSpec.inferSubcommands) {
+    return undefined;
+  }
+  let match: string | undefined;
+  for (const [candidate, canonical] of map) {
+    if (!candidate.startsWith(token)) {
+      continue;
+    }
+    if (match !== undefined && match !== canonical) {
+      return undefined;
+    }
+    match = canonical;
+  }
+  return match;
+}
+
+/** Handle a `--long`, `--long=value` or `--no-long` token. Returns the last index consumed. */
+function handleLong(
+  token: string,
+  argv: readonly string[],
+  i: number,
+  cmdSpec: CommandSpec,
+  state: ParseState,
+): number {
+  const eq = token.indexOf('=');
+  const name = eq === -1 ? token.slice(2) : token.slice(2, eq);
+
+  let entry = cmdSpec.longs.get(name);
+  if (entry === undefined && cmdSpec.inferLong) {
+    entry = inferLongEntry(cmdSpec, name);
+  }
+  if (entry === undefined) {
+    state.unknown.push(`--${name}`);
+    return i;
+  }
+
+  const { spec, negated } = entry;
+
+  if (eq !== -1) {
+    const inline = token.slice(eq + 1);
+    if (spec.builtin !== undefined || spec.isCount) {
+      applyFlagOnly(spec, negated, state);
+      return i;
+    }
+    if (spec.isBool && negated) {
+      // `--no-verbose=true` means "negate", so invert whatever was supplied.
+      state.result[spec.key] = coerceValue(inline, spec.def, `--${name}`) === false;
+      state.explicitlySet.add(spec.key);
+      return i;
+    }
+    applyValues(spec, [inline], state);
+    return i;
+  }
+
+  if (spec.max === 0) {
+    applyFlagOnly(spec, negated, state);
+    return i;
+  }
+  if (spec.def.requireEquals) {
+    if (spec.min === 0) {
+      applyMissingValue(spec, state);
+      return i;
+    }
+    throw new CliParseError(
+      `equal sign is needed when assigning values to '${displayName(spec)}'`,
+    );
+  }
+  return consumeValues(spec, argv, i + 1, cmdSpec, state);
+}
+
+/** Handle a `-abc`, `-p80`, `-p=80` or `-p 80` token. Returns the last index consumed. */
+function handleShort(
+  token: string,
+  argv: readonly string[],
+  i: number,
+  cmdSpec: CommandSpec,
+  state: ParseState,
+): number {
+  for (let c = 1; c < token.length; c++) {
+    const flag = token[c]!;
+    const spec = cmdSpec.shorts.get(flag);
+
+    if (spec === undefined) {
+      state.unknown.push(`-${flag}`);
+      return i;
+    }
+
+    if (spec.builtin === 'help') {
+      state.helpRequested = true;
+      state.helpIsShort = true;
+      continue;
+    }
+    if (spec.max === 0) {
+      applyFlagOnly(spec, false, state);
+      continue;
+    }
+
+    // A value-taking short flag takes the rest of the cluster, or the next token.
+    if (c + 1 < token.length) {
+      // clap strips a single leading '=' so `-o=v` and `-ov` agree.
+      const attached = token.charCodeAt(c + 1) === 61 ? token.slice(c + 2) : token.slice(c + 1);
+      applyValues(spec, [attached], state);
+      return i;
+    }
+    if (spec.def.requireEquals) {
+      if (spec.min === 0) {
+        applyMissingValue(spec, state);
+        return i;
+      }
+      throw new CliParseError(
+        `equal sign is needed when assigning values to '${displayName(spec)}'`,
+      );
+    }
+    return consumeValues(spec, argv, i + 1, cmdSpec, state);
+  }
+
+  return i;
+}
+
+// ---- Positional Assignment ----
+
+function assignPositionals(cmdSpec: CommandSpec, state: ParseState): void {
+  let index = 0;
+
+  for (const spec of cmdSpec.positionals) {
+    if (spec.def.last) {
+      // `last` positionals are only fed from tokens after `--`.
+      if (state.rest.length > 0) {
+        state.result[spec.key] = state.rest[0]!;
+        state.explicitlySet.add(spec.key);
+      }
+      continue;
+    }
+
+    if (spec.def.trailingVarArg) {
+      if (index < state.positionals.length) {
+        state.result[spec.key] = state.positionals.slice(index);
+        state.explicitlySet.add(spec.key);
+        index = state.positionals.length;
+      }
+      return;
+    }
+
+    if (index >= state.positionals.length) {
+      continue;
+    }
+
+    if (spec.max > 1) {
+      const take = Math.min(spec.max, state.positionals.length - index);
+      const values = state.positionals.slice(index, index + take);
+      state.result[spec.key] = values.map((v) => String(coerceValue(v, spec.def, spec.key)));
+      state.explicitlySet.add(spec.key);
+      index += take;
+      continue;
+    }
+
+    state.result[spec.key] = coerceValue(state.positionals[index]!, spec.def, spec.key);
+    state.explicitlySet.add(spec.key);
+    index++;
+  }
+}
+
+// ---- Defaults, Env, Delimiters ----
+
 function splitByDelimiter(value: string | string[], delimiter: string): string[] {
   if (Array.isArray(value)) {
-    const result: string[] = [];
+    const out: string[] = [];
     for (const v of value) {
-      result.push(...v.split(delimiter));
+      out.push(...v.split(delimiter));
     }
-    return result;
+    return out;
   }
   return value.split(delimiter);
 }
 
-// ---- Main Parser ----
+function applyFallbacks(cmdSpec: CommandSpec, state: ParseState): void {
+  const { result, explicitlySet } = state;
 
-/**
- * Parse raw argument tokens against a command definition.
- *
- * Uses node:util parseArgs for core tokenizing, then layers on all clap-ts features.
- */
-export function parseArgs(rawArgs: readonly string[], command: CommandDef): ParseResult {
-  const argsDef = command.args ?? {};
-  const inferLong = command.meta.inferLongArgs === true;
-
-  // Build parseArgs config from our ArgDef definitions
-  const { options, optionalValueFlags } = buildParseArgsOptions(argsDef);
-
-  // Build flag maps once and reuse throughout parsing
-  const { longMap, shortMap, hasHyphenOrNegative } = buildFlagMaps(argsDef);
-
-  // Pre-process: handle optional-value flags, allowHyphenValues, allowNegativeNumbers
-  const { processedArgs, optionalDefaults } = preprocessArgs(
-    rawArgs,
-    optionalValueFlags,
-    longMap,
-    shortMap,
-    hasHyphenOrNegative,
-  );
-
-  // Run node:util parseArgs (strict: false so unknown flags don't throw)
-  let parsed: { values: Record<string, unknown>; positionals: string[] };
-  try {
-    parsed = nodeParseArgs({
-      args: processedArgs,
-      options,
-      allowPositionals: true,
-      strict: false,
-    }) as { values: Record<string, unknown>; positionals: string[] };
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    throw new CliParseError(msg);
-  }
-
-  const { values, positionals: rawPositionals } = parsed;
-
-  const result: Record<string, string | number | boolean | string[]> = {};
-  const unknown: string[] = [];
-  const explicitlySet = new Set<string>();
-
-  // Extract help/version and detect short vs long help
-  const helpRequested = values['help'] === true;
-  const helpIsShort = helpRequested && rawArgs.some((a) => a === '-h');
-  const versionRequested = values['version'] === true;
-
-  // Process each parsed value back through our ArgDef system
-  for (const [parsedKey, rawValue] of Object.entries(values)) {
-    if (parsedKey === 'help' || parsedKey === 'version') {
-      continue;
-    }
-
-    // Handle --no-<flag> negation
-    if (parsedKey.startsWith('no-') && rawValue === true) {
-      const positiveName = parsedKey.slice(3);
-      const entry = longMap.get(positiveName);
-      if (entry && entry.def.type === 'boolean') {
-        result[entry.key] = false;
-        explicitlySet.add(entry.key);
-        continue;
-      }
-    }
-
-    // Look up canonical key via long map
-    const entry = longMap.get(parsedKey);
-    if (entry) {
-      applyValue(entry.key, entry.def, rawValue, result, explicitlySet);
-      continue;
-    }
-
-    // Check short map
-    const shortEntry = shortMap.get(parsedKey);
-    if (shortEntry) {
-      applyValue(shortEntry.key, shortEntry.def, rawValue, result, explicitlySet);
-      continue;
-    }
-
-    // inferLongArgs: try prefix matching on unknown long flags
-    if (inferLong) {
-      const inferred = tryInferLongArg(parsedKey, longMap);
-      if (inferred) {
-        applyValue(inferred.key, inferred.def, rawValue, result, explicitlySet);
-        continue;
-      }
-    }
-
-    unknown.push(`--${parsedKey}`);
-  }
-
-  // Apply optional-value defaults from pre-scan
-  for (const [key, defaultVal] of optionalDefaults) {
-    if (!explicitlySet.has(key)) {
-      result[key] = defaultVal;
-      explicitlySet.add(key);
-    }
-  }
-
-  // Split positionals from rest (tokens after --)
-  const { positionals: allPositionals, rest } = splitPositionalsAndRest(rawArgs, rawPositionals);
-
-  // Detect subcommand in positionals
-  const subCmdResult = detectSubcommand(allPositionals, command);
-  const subCommand = subCmdResult?.name;
-
-  // Remove subcommand token from positionals
-  const positionals: string[] = [];
-  for (let i = 0; i < allPositionals.length; i++) {
-    if (subCmdResult && i === subCmdResult.index) {
-      continue;
-    }
-    positionals.push(allPositionals[i]!);
-  }
-
-  // Assign positionals to positional arg defs
-  const positionalDefs: { key: string; def: ArgDef }[] = [];
-  for (const [key, def] of Object.entries(argsDef)) {
-    if (def.type === 'positional') {
-      positionalDefs.push({ key, def });
-    }
-  }
-
-  for (let p = 0; p < positionalDefs.length; p++) {
-    const { key, def } = positionalDefs[p]!;
-
-    // last: this positional only gets values from rest (after --)
-    if (def.last) {
-      if (rest.length > 0) {
-        result[key] = rest[0]!;
-        explicitlySet.add(key);
-      }
-      continue;
-    }
-
-    // trailingVarArg: consume all remaining positionals as an array
-    if (def.trailingVarArg) {
-      if (p < positionals.length) {
-        result[key] = positionals.slice(p);
-        explicitlySet.add(key);
-      }
-      break; // no more positional defs to process
-    }
-
-    // Normal positional assignment
-    if (p < positionals.length) {
-      result[key] = coerceValue(positionals[p]!, def, key);
-      explicitlySet.add(key);
-    }
-  }
-
-  // Single pass: valueDelimiter splitting, env fallback, conditional defaults, static defaults
-  const argsDefEntries = Object.entries(argsDef);
-  for (let a = 0; a < argsDefEntries.length; a++) {
-    const [key, def] = argsDefEntries[a]!;
-
+  for (const spec of cmdSpec.all) {
+    const { key, def } = spec;
     if (explicitlySet.has(key)) {
-      // Apply valueDelimiter splitting for explicitly set args
       if (def.valueDelimiter) {
         const value = result[key];
         if (value !== undefined && (typeof value === 'string' || Array.isArray(value))) {
@@ -661,13 +638,8 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
       continue;
     }
 
-    // Env var fallback
     if (def.env) {
-      const envValue =
-        globalThis.Bun === undefined
-          ? process.env[def.env]
-          : (globalThis.Bun as { env: Record<string, string | undefined> }).env[def.env];
-
+      const envValue = readEnv(def.env);
       if (envValue !== undefined && envValue !== '') {
         result[key] = def.valueDelimiter
           ? envValue.split(def.valueDelimiter)
@@ -677,7 +649,6 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
       }
     }
 
-    // Conditional default (defaultValueIf)
     if (def.defaultValueIf) {
       const [otherKey, otherValue, conditionalDefault] = def.defaultValueIf;
       if (String(result[otherKey]) === String(otherValue)) {
@@ -686,95 +657,112 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
       }
     }
 
-    // Static default
     if (def.default !== undefined) {
-      if (Array.isArray(def.default)) {
-        result[key] = [...def.default];
-      } else if (
-        typeof def.default === 'string' ||
-        typeof def.default === 'number' ||
-        typeof def.default === 'boolean'
-      ) {
-        result[key] = def.default;
-      }
+      result[key] = Array.isArray(def.default) ? [...def.default] : (def.default as string | number | boolean);
     }
   }
+}
 
-  // Convert keys to camelCase for the result
-  const camelResult: Record<string, string | number | boolean | string[]> = {};
-  for (const [key, value] of Object.entries(result)) {
-    const camelKey = kebabToCamel(key);
-    camelResult[camelKey] = value;
-    if (key !== camelKey) {
-      camelResult[key] = value;
+// ---- Main Parser ----
+
+/**
+ * Parse raw argument tokens against a command definition.
+ *
+ * Stops at the first bare token matching a subcommand name or alias; the
+ * remaining tokens are returned as `subCommandArgs` for the caller to parse
+ * against that subcommand.
+ */
+export function parseArgs(rawArgs: readonly string[], command: CommandDef): ParseResult {
+  const cmdSpec = getSpec(command);
+
+  const state: ParseState = {
+    result: {},
+    explicitlySet: new Set<string>(),
+    unknown: [],
+    positionals: [],
+    rest: [],
+    helpRequested: false,
+    helpIsShort: false,
+    versionRequested: false,
+    subCommandIsExternal: false,
+    subCommandArgs: [],
+  };
+
+  let i = 0;
+  for (; i < rawArgs.length; i++) {
+    const token = rawArgs[i]!;
+
+    if (token === '--') {
+      for (let r = i + 1; r < rawArgs.length; r++) {
+        state.rest.push(rawArgs[r]!);
+      }
+      break;
+    }
+
+    if (token.length > 1 && token.charCodeAt(0) === HYPHEN) {
+      if (token.charCodeAt(1) === HYPHEN) {
+        i = handleLong(token, rawArgs, i, cmdSpec, state);
+        continue;
+      }
+      // A negative number is a value, not a flag cluster, when nothing claims
+      // the leading digit as a short flag.
+      const isNegativeValue =
+        cmdSpec.allowsNegative &&
+        NEGATIVE_NUMBER.test(token) &&
+        !cmdSpec.shorts.has(token[1]!);
+      if (!isNegativeValue) {
+        i = handleShort(token, rawArgs, i, cmdSpec, state);
+        continue;
+      }
+    }
+
+    if (state.positionals.length === 0) {
+      const canonical = resolveSubcommand(cmdSpec, token);
+      if (canonical !== undefined) {
+        state.subCommand = canonical;
+        state.subCommandArgs = rawArgs.slice(i + 1);
+        break;
+      }
+      if (cmdSpec.allowExternal) {
+        state.subCommand = token;
+        state.subCommandIsExternal = true;
+        state.subCommandArgs = rawArgs.slice(i + 1);
+        break;
+      }
+    }
+
+    state.positionals.push(token);
+  }
+
+  assignPositionals(cmdSpec, state);
+  applyFallbacks(cmdSpec, state);
+
+  // Expose both the declared key and its camelCase form.
+  const args: Record<string, string | number | boolean | string[]> = {};
+  for (const spec of cmdSpec.all) {
+    const value = state.result[spec.key];
+    if (value === undefined) {
+      continue;
+    }
+    args[spec.camel] = value;
+    if (spec.key !== spec.camel) {
+      args[spec.key] = value;
     }
   }
 
   return {
-    args: camelResult,
-    positionals,
-    rest,
-    subCommand,
-    helpRequested,
-    helpIsShort,
-    versionRequested,
-    unknown,
-    explicitlySet,
+    args,
+    positionals: state.positionals,
+    rest: state.rest,
+    subCommand: state.subCommand,
+    subCommandIsExternal: state.subCommandIsExternal,
+    subCommandArgs: state.subCommandArgs,
+    helpRequested: state.helpRequested,
+    helpIsShort: state.helpIsShort,
+    versionRequested: state.versionRequested,
+    unknown: state.unknown,
+    explicitlySet: state.explicitlySet,
   };
-}
-
-// ---- Value Application Helper ----
-
-/**
- * Apply a raw value from parseArgs into the result, handling count, append,
- * number coercion, boolean conversion, and function valueParser.
- */
-function applyValue(
-  key: string,
-  def: ArgDef,
-  rawValue: unknown,
-  result: Record<string, string | number | boolean | string[]>,
-  explicitlySet: Set<string>,
-): void {
-  if (def.action === 'count') {
-    if (Array.isArray(rawValue)) {
-      result[key] = rawValue.length;
-    } else {
-      result[key] = rawValue === true ? 1 : 0;
-    }
-    explicitlySet.add(key);
-    return;
-  }
-
-  if (def.type === 'boolean') {
-    result[key] = rawValue === true;
-    explicitlySet.add(key);
-    return;
-  }
-
-  if (def.action === 'append') {
-    // node:util parseArgs returns string[] for multiple:true string options
-    if (Array.isArray(rawValue)) {
-      result[key] = rawValue as string[];
-    } else if (typeof rawValue === 'string') {
-      result[key] = [rawValue];
-    }
-    explicitlySet.add(key);
-    return;
-  }
-
-  // Single string/number/enum value
-  if (typeof rawValue === 'string') {
-    result[key] = coerceValue(rawValue, def, `--${def.long ?? key}`);
-    explicitlySet.add(key);
-    return;
-  }
-
-  // Boolean value for a string-typed arg (edge case from parseArgs)
-  if (typeof rawValue === 'boolean' && rawValue) {
-    result[key] = def.defaultMissingValue ?? true;
-    explicitlySet.add(key);
-  }
 }
 
 // ---- Global Args ----

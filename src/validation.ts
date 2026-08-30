@@ -8,6 +8,79 @@
 import type { ArgDef, ArgsDef, CommandDef, ParseResult } from './types.js';
 import { CliParseError } from './parser.js';
 
+// ---- Compiled Validation Spec ----
+
+/**
+ * Most commands use only a few of the constraint kinds, so the subsets are
+ * computed once per command rather than walking every arg nine times per run.
+ */
+interface ValidationSpec {
+  readonly entries: readonly (readonly [string, ArgDef])[];
+  readonly exclusive: readonly (readonly [string, ArgDef])[];
+  readonly required: readonly (readonly [string, ArgDef])[];
+  readonly requiredIfEq: readonly (readonly [string, ArgDef])[];
+  readonly valueParser: readonly (readonly [string, ArgDef])[];
+  readonly conflicts: readonly (readonly [string, ArgDef])[];
+  readonly requires: readonly (readonly [string, ArgDef])[];
+  readonly numArgs: readonly (readonly [string, ArgDef])[];
+}
+
+const specCache = new WeakMap<CommandDef, ValidationSpec>();
+
+function buildValidationSpec(command: CommandDef): ValidationSpec {
+  const entries: (readonly [string, ArgDef])[] = [];
+  const exclusive: (readonly [string, ArgDef])[] = [];
+  const required: (readonly [string, ArgDef])[] = [];
+  const requiredIfEq: (readonly [string, ArgDef])[] = [];
+  const valueParser: (readonly [string, ArgDef])[] = [];
+  const conflicts: (readonly [string, ArgDef])[] = [];
+  const requires: (readonly [string, ArgDef])[] = [];
+  const numArgs: (readonly [string, ArgDef])[] = [];
+
+  const argsDef = command.args ?? {};
+  for (const key of Object.keys(argsDef)) {
+    const def = argsDef[key]!;
+    const entry = [key, def] as const;
+    entries.push(entry);
+
+    if (def.exclusive) {
+      exclusive.push(entry);
+    }
+    if (def.required && def.default === undefined) {
+      required.push(entry);
+    }
+    if (def.requiredIfEq) {
+      requiredIfEq.push(entry);
+    }
+    if (def.valueParser) {
+      valueParser.push(entry);
+    }
+    if (def.conflictsWith && def.conflictsWith.length > 0) {
+      conflicts.push(entry);
+    }
+    if (def.requires && def.requires.length > 0) {
+      requires.push(entry);
+    }
+    // The parser enforces numArgs per occurrence while consuming tokens, the
+    // way clap does. Only positionals and delimiter-split values reach here
+    // without having been counted.
+    if (def.numArgs && (def.type === 'positional' || def.valueDelimiter !== undefined)) {
+      numArgs.push(entry);
+    }
+  }
+
+  return { entries, exclusive, required, requiredIfEq, valueParser, conflicts, requires, numArgs };
+}
+
+function getValidationSpec(command: CommandDef): ValidationSpec {
+  let spec = specCache.get(command);
+  if (spec === undefined) {
+    spec = buildValidationSpec(command);
+    specCache.set(command, spec);
+  }
+  return spec;
+}
+
 // ---- Levenshtein Distance ----
 
 /**
@@ -166,14 +239,11 @@ function validateUnknownFlags(
 
 /** Validate exclusive args -- cannot be used with any other arg. */
 function validateExclusive(
+  spec: ValidationSpec,
   argsDef: ArgsDef,
-  args: Record<string, string | number | boolean | string[]>,
   explicitlySet: ReadonlySet<string>,
 ): void {
-  for (const [key, def] of Object.entries(argsDef)) {
-    if (!def.exclusive) {
-      continue;
-    }
+  for (const [key, def] of spec.exclusive) {
     if (!explicitlySet.has(key)) {
       continue;
     }
@@ -201,6 +271,7 @@ function validateExclusive(
  * Respects requiredUnlessPresent and subcommandNegatesReqs.
  */
 function validateRequired(
+  spec: ValidationSpec,
   argsDef: ArgsDef,
   args: Record<string, string | number | boolean | string[]>,
   skipRequired: boolean,
@@ -211,14 +282,7 @@ function validateRequired(
 
   const missing: string[] = [];
 
-  for (const [key, def] of Object.entries(argsDef)) {
-    if (!def.required) {
-      continue;
-    }
-    if (def.default !== undefined) {
-      continue;
-    }
-
+  for (const [key, def] of spec.required) {
     // requiredUnlessPresent: skip if the named arg(s) are present
     if (def.requiredUnlessPresent) {
       const unlessArgs = Array.isArray(def.requiredUnlessPresent)
@@ -245,15 +309,11 @@ function validateRequired(
 
 /** Validate requiredIfEq -- arg required when another arg equals a specific value. */
 function validateRequiredIfEq(
-  argsDef: ArgsDef,
+  spec: ValidationSpec,
   args: Record<string, string | number | boolean | string[]>,
 ): void {
-  for (const [key, def] of Object.entries(argsDef)) {
-    if (!def.requiredIfEq) {
-      continue;
-    }
-
-    const [otherKey, otherValue] = def.requiredIfEq;
+  for (const [key, def] of spec.requiredIfEq) {
+    const [otherKey, otherValue] = def.requiredIfEq!;
     const otherArgValue = args[otherKey];
 
     // Check if the other arg's value matches the condition
@@ -271,14 +331,10 @@ function validateRequiredIfEq(
 
 /** Validate valueParser (enum-like restricted values). */
 function validateValueParser(
-  argsDef: ArgsDef,
+  spec: ValidationSpec,
   args: Record<string, string | number | boolean | string[]>,
 ): void {
-  for (const [key, def] of Object.entries(argsDef)) {
-    if (!def.valueParser) {
-      continue;
-    }
-
+  for (const [key, def] of spec.valueParser) {
     const value = args[key];
     if (value === undefined) {
       continue;
@@ -292,15 +348,16 @@ function validateValueParser(
     }
 
     // Enum-style value parser: validate against allowed values
-    if (def.valueParser.length === 0) {
+    const possible = def.valueParser as readonly string[];
+    if (possible.length === 0) {
       continue;
     }
 
     const valueName = def.valueName ?? longName.toUpperCase();
     const values = Array.isArray(value) ? value : [String(value)];
     for (const v of values) {
-      if (!def.valueParser.includes(v)) {
-        const possibleStr = def.valueParser.join(', ');
+      if (!possible.includes(v)) {
+        const possibleStr = possible.join(', ');
         throw new CliParseError(
           `invalid value '${v}' for '--${longName} <${valueName}>'\n  [possible values: ${possibleStr}]`,
         );
@@ -321,19 +378,16 @@ function formatFlagForError(key: string, def: ArgDef): string {
 
 /** Validate conflictsWith constraints. */
 function validateConflicts(
+  spec: ValidationSpec,
   argsDef: ArgsDef,
   args: Record<string, string | number | boolean | string[]>,
 ): void {
-  for (const [key, def] of Object.entries(argsDef)) {
-    if (!def.conflictsWith || def.conflictsWith.length === 0) {
-      continue;
-    }
-
+  for (const [key, def] of spec.conflicts) {
     if (!isArgSet(args[key], def.type)) {
       continue;
     }
 
-    for (const conflictKey of def.conflictsWith) {
+    for (const conflictKey of def.conflictsWith!) {
       const conflictDef = argsDef[conflictKey];
       if (!isArgSet(args[conflictKey], conflictDef?.type)) {
         continue;
@@ -350,20 +404,17 @@ function validateConflicts(
 
 /** Validate requires constraints. */
 function validateRequires(
+  spec: ValidationSpec,
   argsDef: ArgsDef,
   args: Record<string, string | number | boolean | string[]>,
 ): void {
-  for (const [key, def] of Object.entries(argsDef)) {
-    if (!def.requires || def.requires.length === 0) {
-      continue;
-    }
-
+  for (const [key, def] of spec.requires) {
     if (!isArgSet(args[key], def.type)) {
       continue;
     }
 
     const missing: string[] = [];
-    for (const requiredKey of def.requires) {
+    for (const requiredKey of def.requires!) {
       const requiredDef = argsDef[requiredKey];
       if (!isArgSet(args[requiredKey], requiredDef?.type)) {
         missing.push(`--${requiredDef?.long ?? requiredKey}`);
@@ -378,28 +429,24 @@ function validateRequires(
 
 /** Validate numArgs constraints. */
 function validateNumArgs(
-  argsDef: ArgsDef,
+  spec: ValidationSpec,
   args: Record<string, string | number | boolean | string[]>,
 ): void {
-  for (const [key, def] of Object.entries(argsDef)) {
-    if (!def.numArgs) {
-      continue;
-    }
-
+  for (const [key, def] of spec.numArgs) {
     const value = args[key];
     if (value === undefined) {
       continue;
     }
 
     const count = Array.isArray(value) ? value.length : 1;
-    if (count < def.numArgs.min) {
+    if (count < def.numArgs!.min) {
       throw new CliParseError(
-        `the argument '--${def.long ?? key}' requires at least ${String(def.numArgs.min)} values but ${String(count)} were provided`,
+        `the argument '--${def.long ?? key}' requires at least ${String(def.numArgs!.min)} values but ${String(count)} were provided`,
       );
     }
-    if (count > def.numArgs.max) {
+    if (count > def.numArgs!.max) {
       throw new CliParseError(
-        `the argument '--${def.long ?? key}' accepts at most ${String(def.numArgs.max)} values but ${String(count)} were provided`,
+        `the argument '--${def.long ?? key}' accepts at most ${String(def.numArgs!.max)} values but ${String(count)} were provided`,
       );
     }
   }
@@ -442,15 +489,19 @@ export function validate(parseResult: ParseResult, command: CommandDef): void {
   const skipRequired =
     command.meta.subcommandNegatesReqs === true && parseResult.subCommand !== undefined;
 
-  validateUnknownFlags(unknown, argsDef, command);
-  validateExclusive(argsDef, args, explicitlySet);
-  validateRequired(argsDef, args, skipRequired);
-  if (!skipRequired) {
-    validateRequiredIfEq(argsDef, args);
+  const spec = getValidationSpec(command);
+
+  if (unknown.length > 0) {
+    validateUnknownFlags(unknown, argsDef, command);
   }
-  validateValueParser(argsDef, args);
-  validateConflicts(argsDef, args);
-  validateRequires(argsDef, args);
-  validateNumArgs(argsDef, args);
+  validateExclusive(spec, argsDef, explicitlySet);
+  validateRequired(spec, argsDef, args, skipRequired);
+  if (!skipRequired) {
+    validateRequiredIfEq(spec, args);
+  }
+  validateValueParser(spec, args);
+  validateConflicts(spec, argsDef, args);
+  validateRequires(spec, argsDef, args);
+  validateNumArgs(spec, args);
   validateGroups(command, argsDef, args);
 }

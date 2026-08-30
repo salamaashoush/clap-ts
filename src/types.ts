@@ -86,6 +86,10 @@ export interface ArgDef {
   readonly valueParser?: readonly string[] | ValueParserFn;
   /** Character to split values on (e.g., ',' for --tags=a,b,c). */
   readonly valueDelimiter?: string;
+  /** Require `--flag=value` form; reject `--flag value`. */
+  readonly requireEquals?: boolean;
+  /** Token that ends value collection for a multi-value arg (e.g., ';'). */
+  readonly valueTerminator?: string;
   /** Min/max number of values this arg accepts. */
   readonly numArgs?: NumArgs;
   /** Names of args that conflict with this one (mutually exclusive). */
@@ -296,6 +300,10 @@ export interface ParseResult {
   readonly rest: readonly string[];
   /** The subcommand name if one was matched. */
   readonly subCommand?: string;
+  /** Whether the matched subcommand was accepted via allowExternalSubcommands. */
+  readonly subCommandIsExternal: boolean;
+  /** Tokens following the matched subcommand, to be parsed against it. */
+  readonly subCommandArgs: readonly string[];
   /** Whether --help / -h was requested. */
   readonly helpRequested: boolean;
   /** Whether -h (short) was used vs --help (long). */

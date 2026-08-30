@@ -430,3 +430,164 @@ describe('aliases', () => {
     expect(result.args.dir).toBe('./mocks');
   });
 });
+
+// ---- Tokenizer regressions ----
+
+describe('boolean values via =', () => {
+  test('--flag=true is true', () => {
+    const result = parseArgs(['--verbose=true'], cmd({ verbose: { type: 'boolean' } }));
+    expect(result.args.verbose).toBe(true);
+  });
+
+  test('--flag=1 and --flag=yes are true', () => {
+    const c = cmd({ verbose: { type: 'boolean' } });
+    expect(parseArgs(['--verbose=1'], c).args.verbose).toBe(true);
+    expect(parseArgs(['--verbose=yes'], c).args.verbose).toBe(true);
+  });
+
+  test('--flag=false and --flag=junk are false', () => {
+    const c = cmd({ verbose: { type: 'boolean' } });
+    expect(parseArgs(['--verbose=false'], c).args.verbose).toBe(false);
+    expect(parseArgs(['--verbose=junk'], c).args.verbose).toBe(false);
+  });
+});
+
+describe('missing values are rejected', () => {
+  test('flag at end of argv', () => {
+    expect(() => parseArgs(['--name'], cmd({ name: { type: 'string' } }))).toThrow(
+      "a value is required for '--name' but none was supplied",
+    );
+  });
+
+  test('flag followed by another flag', () => {
+    const c = cmd({ name: { type: 'string' }, verbose: { type: 'boolean' } });
+    expect(() => parseArgs(['--name', '--verbose'], c)).toThrow(
+      "a value is required for '--name' but none was supplied",
+    );
+  });
+
+  test('append flag with no value', () => {
+    const c = cmd({ header: { type: 'string', short: 'H', action: 'append' } });
+    expect(() => parseArgs(['-H'], c)).toThrow(CliParseError);
+  });
+});
+
+describe('short flag values', () => {
+  test('-p=80 strips the equals like clap', () => {
+    const result = parseArgs(['-p=80'], cmd({ port: { type: 'number', short: 'p' } }));
+    expect(result.args.port).toBe(80);
+  });
+
+  test('-c= yields an empty string', () => {
+    const result = parseArgs(['-c='], cmd({ config: { type: 'string', short: 'c' } }));
+    expect(result.args.config).toBe('');
+  });
+
+  test('unknown short flag is reported with a single dash', () => {
+    const result = parseArgs(['-Z'], cmd({ verbose: { type: 'boolean', short: 'v' } }));
+    expect(result.unknown).toEqual(['-Z']);
+  });
+});
+
+describe('numArgs consumes multiple tokens', () => {
+  const multi = cmd({
+    verbose: { type: 'boolean' },
+    files: { type: 'string', action: 'append', numArgs: { min: 2, max: 5 } },
+  });
+
+  test('collects up to max values', () => {
+    expect(parseArgs(['--files', 'a', 'b'], multi).args.files).toEqual(['a', 'b']);
+  });
+
+  test('stops at the next flag', () => {
+    const result = parseArgs(['--files', 'a', 'b', '--verbose'], multi);
+    expect(result.args.files).toEqual(['a', 'b']);
+    expect(result.args.verbose).toBe(true);
+    expect(result.positionals).toEqual([]);
+  });
+
+  test('too few values is an error', () => {
+    expect(() => parseArgs(['--files', 'a'], multi)).toThrow(
+      "the argument '--files' requires at least 2 values but 1 were provided",
+    );
+  });
+
+  test('valueTerminator ends collection', () => {
+    const c = cmd({
+      cmds: {
+        type: 'string',
+        action: 'append',
+        numArgs: { min: 1, max: 99 },
+        allowHyphenValues: true,
+        valueTerminator: ';',
+      },
+      location: { type: 'positional' },
+    });
+    const result = parseArgs(['--cmds', 'ls', '-la', ';', '/tmp'], c);
+    expect(result.args.cmds).toEqual(['ls', '-la']);
+    expect(result.args.location).toBe('/tmp');
+  });
+});
+
+describe('requireEquals', () => {
+  const c = cmd({ config: { type: 'string', short: 'c', requireEquals: true } });
+
+  test('accepts --config=value', () => {
+    expect(parseArgs(['--config=x'], c).args.config).toBe('x');
+  });
+
+  test('rejects --config value', () => {
+    expect(() => parseArgs(['--config', 'x'], c)).toThrow(
+      "equal sign is needed when assigning values to '--config'",
+    );
+  });
+
+  test('rejects -c value', () => {
+    expect(() => parseArgs(['-c', 'x'], c)).toThrow(CliParseError);
+  });
+});
+
+describe('negative numbers as positionals', () => {
+  test('allowNegativeNumbers lets a positional take -5', () => {
+    const c = cmd({
+      n: { type: 'positional', allowNegativeNumbers: true },
+      m: { type: 'positional' },
+    });
+    const result = parseArgs(['-5', 'x'], c);
+    expect(result.args.n).toBe('-5');
+    expect(result.args.m).toBe('x');
+    expect(result.unknown).toEqual([]);
+  });
+});
+
+describe('subcommand boundary', () => {
+  const c = cmd(
+    { verbose: { type: 'boolean', short: 'v' }, name: { type: 'string' } },
+    { serve: { meta: { name: 'serve' } } },
+  );
+
+  test('tokens after the subcommand are handed on untouched', () => {
+    const result = parseArgs(['-v', 'serve', '--port', '9'], c);
+    expect(result.subCommand).toBe('serve');
+    expect(result.args.verbose).toBe(true);
+    expect(result.subCommandArgs).toEqual(['--port', '9']);
+  });
+
+  test('a flag value is never mistaken for a subcommand', () => {
+    const result = parseArgs(['--name', 'serve'], c);
+    expect(result.subCommand).toBeUndefined();
+    expect(result.args.name).toBe('serve');
+  });
+});
+
+describe('inferLongArgs ambiguity', () => {
+  test('an ambiguous prefix is not resolved', () => {
+    const c: CommandDef = {
+      meta: { name: 'test', inferLongArgs: true },
+      args: { verbose: { type: 'boolean' } },
+    };
+    // --v is a prefix of both --verbose and the built-in --version.
+    expect(parseArgs(['--v'], c).unknown).toEqual(['--v']);
+    expect(parseArgs(['--verb'], c).args.verbose).toBe(true);
+  });
+});

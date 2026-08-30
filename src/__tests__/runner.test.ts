@@ -195,3 +195,100 @@ describe('subcommand resolution via runMain', () => {
     expect(ranSubcommand).toBe(true);
   });
 });
+
+// ---- Dispatch regressions ----
+
+/** Capture everything written to stderr while fn runs. */
+async function captureStderr(fn: () => Promise<void>): Promise<string> {
+  let output = '';
+  const original = process.stderr.write;
+  process.stderr.write = ((chunk: string) => {
+    output += chunk;
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await fn();
+  } finally {
+    process.stderr.write = original;
+  }
+  return output.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+describe('flags before a subcommand', () => {
+  test('parent flags do not block dispatch', async () => {
+    let port: number | undefined;
+    const root = defineCommand({
+      meta: { name: 'app' },
+      args: { verbose: { type: 'boolean', short: 'v' } },
+      subCommands: {
+        serve: defineCommand({
+          meta: { name: 'serve' },
+          args: { port: { type: 'number', default: 80 } },
+          run({ args }) {
+            port = args.port;
+          },
+        }),
+      },
+    });
+
+    for (const argv of [['serve'], ['--verbose', 'serve'], ['-v', 'serve']]) {
+      port = undefined;
+      await runMain(root, { argv, exit: false });
+      expect(port).toBe(80);
+    }
+  });
+});
+
+describe('global args inheritance', () => {
+  test('a global on an intermediate command reaches a grandchild', async () => {
+    let received: Record<string, unknown> = {};
+    const leaf = defineCommand({
+      meta: { name: 'leaf' },
+      run({ args }) {
+        received = args as Record<string, unknown>;
+      },
+    });
+    const mid = defineCommand({
+      meta: { name: 'mid' },
+      args: { color: { type: 'string', global: true } },
+      subCommands: { leaf },
+    });
+    const root = defineCommand({
+      meta: { name: 'app' },
+      args: { debug: { type: 'boolean', global: true } },
+      subCommands: { mid },
+    });
+
+    await runMain(root, { argv: ['mid', 'leaf', '--color', 'red', '--debug'], exit: false });
+    expect(received['color']).toBe('red');
+    expect(received['debug']).toBe(true);
+  });
+});
+
+describe('error output names the failing command', () => {
+  const root = defineCommand({
+    meta: { name: 'app' },
+    args: { verbose: { type: 'boolean' } },
+    subCommands: {
+      serve: defineCommand({
+        meta: { name: 'serve' },
+        args: { port: { type: 'number', required: true } },
+        run() {},
+      }),
+    },
+  });
+
+  test('missing required arg shows the subcommand usage', async () => {
+    const err = await captureStderr(() => runMain(root, { argv: ['serve'], exit: false }));
+    expect(err).toContain('Usage: app serve');
+    expect(err).not.toContain('Usage: app [OPTIONS]');
+  });
+
+  test('unknown flag shows the subcommand usage and a suggestion', async () => {
+    const err = await captureStderr(() =>
+      runMain(root, { argv: ['serve', '--prot', '3'], exit: false }),
+    );
+    expect(err).toContain('Usage: app serve');
+    expect(err).toContain("a similar argument exists: '--port'");
+  });
+});
