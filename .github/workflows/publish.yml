@@ -23,6 +23,13 @@ jobs:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
 
+      # Node 22 ships npm 10.x. Trusted publishing needs 11.5.1 or newer, and
+      # without it npm falls back to looking for a token that is no longer set.
+      - name: Use an npm that supports trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
+
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
@@ -61,7 +68,8 @@ jobs:
       - name: Check the published artifact
         run: bun run check:package
 
+      # No token: npm trades the GitHub OIDC identity for a short-lived
+      # credential, and generates the provenance attestation itself, so
+      # --provenance is no longer passed explicitly.
       - name: Publish to npm
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
