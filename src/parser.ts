@@ -34,7 +34,7 @@ const HYPHEN = 45;
 const NEGATIVE_NUMBER = /^-\d/;
 
 /** Convert kebab-case to camelCase: --config-path -> configPath */
-function kebabToCamel(s: string): string {
+export function kebabToCamel(s: string): string {
   return s.replaceAll(/-([a-z])/g, (_, c: string) => c.toUpperCase());
 }
 

@@ -317,3 +317,58 @@ describe('low-level API accepts a defineCommand result', () => {
     expect(renderHelp(command)).toContain('--port');
   });
 });
+
+describe('global arg values reach the running command', () => {
+  const leaf = defineCommand({
+    meta: { name: 'leaf' },
+    args: { local: { type: 'string' } },
+    run({ args }) {
+      seen = args as Record<string, unknown>;
+    },
+  });
+  const mid = defineCommand({
+    meta: { name: 'mid' },
+    args: { color: { type: 'string', global: true } },
+    subCommands: { leaf },
+  });
+  const root = defineCommand({
+    meta: { name: 'app' },
+    args: { verbose: { type: 'boolean', short: 'v', global: true } },
+    subCommands: { mid },
+  });
+  let seen: Record<string, unknown> = {};
+
+  test('a global given before the subcommand still arrives', async () => {
+    seen = {};
+    await runMain(root, { argv: ['--verbose', 'mid', 'leaf'], exit: false });
+    expect(seen['verbose']).toBe(true);
+  });
+
+  test('a global from an intermediate level arrives too', async () => {
+    seen = {};
+    await runMain(root, { argv: ['-v', 'mid', '--color', 'red', 'leaf'], exit: false });
+    expect(seen['verbose']).toBe(true);
+    expect(seen['color']).toBe('red');
+  });
+
+  test('the deepest occurrence wins', async () => {
+    seen = {};
+    await runMain(root, {
+      argv: ['mid', '--color', 'red', 'leaf', '--color', 'blue'],
+      exit: false,
+    });
+    expect(seen['color']).toBe('blue');
+  });
+
+  test('a required global satisfied at an ancestor level passes validation', async () => {
+    let ran = false;
+    const child = defineCommand({ meta: { name: 'child' }, run() { ran = true; } });
+    const parent = defineCommand({
+      meta: { name: 'parent' },
+      args: { token: { type: 'string', global: true, required: true } },
+      subCommands: { child },
+    });
+    await runMain(parent, { argv: ['--token', 'abc', 'child'], exit: false });
+    expect(ran).toBe(true);
+  });
+});

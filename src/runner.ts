@@ -11,6 +11,7 @@ import type {
   CommandContext,
   CommandDef,
   ParsedArgs,
+  ParseResult,
   RunOptions,
   StylesDef,
 } from './types.js';
@@ -18,6 +19,7 @@ import {
   CliParseError,
   collectGlobalArgs,
   getRawArgs,
+  kebabToCamel,
   mergeGlobalArgs,
   parseArgs,
 } from './parser.js';
@@ -124,6 +126,32 @@ function resolveHelpTarget(
     current = next;
   }
   return { command: current, parentNames };
+}
+
+/**
+ * Overlay global values captured at ancestor levels onto the resolved command's
+ * result. A value given again at this level always wins.
+ */
+function applyInheritedGlobals(
+  result: ParseResult,
+  inherited: ReadonlyMap<string, string | number | boolean | string[]>,
+): ParseResult {
+  if (inherited.size === 0) {
+    return result;
+  }
+
+  const args = { ...result.args };
+  const explicitlySet = new Set(result.explicitlySet);
+  for (const [key, value] of inherited) {
+    if (explicitlySet.has(key)) {
+      continue;
+    }
+    args[kebabToCamel(key)] = value;
+    args[key] = value;
+    explicitlySet.add(key);
+  }
+
+  return { ...result, args, explicitlySet };
 }
 
 // ---- runCommand ----
@@ -316,6 +344,9 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
     let command: CommandDef = rootCommand;
     let effectiveCommand: CommandDef = rootCommand;
     let inheritedGlobals: ArgsDef = {};
+    // Values of global args given at an ancestor level. clap carries these down
+    // to the command that finally runs, so `app --verbose serve` reaches serve.
+    const inheritedValues = new Map<string, string | number | boolean | string[]>();
     let propagatedVersion: string | undefined;
     let argv: readonly string[] = rawArgs;
     const parentNames: string[] = [];
@@ -350,6 +381,15 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
         );
         handleHelpRequest(target.command, target.parentNames, shouldExit, false, styles);
         return;
+      }
+
+      for (const key of Object.keys(inheritedGlobals)) {
+        if (parseResult.explicitlySet.has(key)) {
+          const value = parseResult.args[key];
+          if (value !== undefined) {
+            inheritedValues.set(key, value);
+          }
+        }
       }
 
       if (
@@ -475,11 +515,14 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
       return;
     }
 
+    // Fold ancestor-provided global values into the command that runs.
+    const finalResult = applyInheritedGlobals(parseResult, inheritedValues);
+
     // Validate parsed args
-    validate(parseResult, effectiveCommand);
+    validate(finalResult, effectiveCommand);
 
     // Run the command
-    await runCommand(effectiveCommand, parseResult.args as ParsedArgs<ArgsDef>, rawArgs);
+    await runCommand(effectiveCommand, finalResult.args as ParsedArgs<ArgsDef>, rawArgs);
 
     // If the command's run() didn't call process.exit() itself, exit cleanly.
     // This prevents the process from hanging when the caller uses `void runMain()`
