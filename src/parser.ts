@@ -159,6 +159,8 @@ interface ArgSpec {
   readonly camel: string;
   /** Whether a second occurrence of this arg should be rejected. */
   readonly repeatIsError: boolean;
+  /** Warning to emit when this arg is used, precomputed from `deprecated`. */
+  readonly deprecation?: string;
   /** Fixed boolean this flag forces, for the setTrue and setFalse actions. */
   readonly forced?: boolean;
   /** Built-in output this arg triggers, for the help and version actions. */
@@ -180,6 +182,8 @@ interface CommandSpec {
   readonly indexedPositionals: number;
   /** Every declared arg, in declaration order, for the fallback and key passes. */
   readonly all: readonly ArgSpec[];
+  /** Declared args by key, for cross-references such as replacedBy. */
+  readonly byKey: Record<string, ArgSpec>;
   /**
    * The command itself, so the subcommand maps can be built on demand. A CLI
    * that only ever sees flags never pays for a lazySubCommands thunk.
@@ -228,6 +232,17 @@ function valueCounts(def: ArgDef): { min: number; max: number } {
   return { min: 1, max: 1 };
 }
 
+/** The stderr notice for a deprecated arg, or undefined when it is current. */
+function deprecationNotice(key: string, def: ArgDef): string | undefined {
+  if (def.deprecated === undefined || def.deprecated === false) {
+    return undefined;
+  }
+  const label = def.type === 'positional' ? `<${def.valueName ?? key}>` : `--${def.long ?? key}`;
+  const reason = typeof def.deprecated === 'string' ? `: ${def.deprecated}` : '';
+  const instead = def.replacedBy === undefined ? '' : `; use '--${def.replacedBy}' instead`;
+  return `'${label}' is deprecated${reason}${instead}`;
+}
+
 function makeSpec(key: string, def: ArgDef, argsOverrideSelf: boolean): ArgSpec {
   const { min, max } = valueCounts(def);
   const isAppend = def.action === 'append';
@@ -242,6 +257,7 @@ function makeSpec(key: string, def: ArgDef, argsOverrideSelf: boolean): ArgSpec 
   return {
     forced,
     triggers,
+    deprecation: deprecationNotice(key, def),
     key,
     def,
     long: def.long ?? key,
@@ -279,6 +295,7 @@ function buildSpec(command: CommandDef): CommandSpec {
   const shorts = new Map<string, ArgSpec>();
   const positionals: ArgSpec[] = [];
   const all: ArgSpec[] = [];
+  const byKey: Record<string, ArgSpec> = {};
   let allowsNegative = false;
 
   const cmdAllowHyphen = command.meta.allowHyphenValues === true;
@@ -300,6 +317,7 @@ function buildSpec(command: CommandDef): CommandSpec {
 
     const spec = makeSpec(key, def, argsOverrideSelf);
     all.push(spec);
+    byKey[key] = spec;
 
     if (def.type === 'positional') {
       positionals.push(spec);
@@ -370,6 +388,7 @@ function buildSpec(command: CommandDef): CommandSpec {
     positionals,
     indexedPositionals: positionals.reduce((n, spec) => (spec.def.last ? n : n + 1), 0),
     all,
+    byKey,
     command,
     anySubcommands: hasSubCommands(command),
     inferSubcommands: command.meta.inferSubcommands === true,
@@ -453,6 +472,8 @@ interface ParseState {
   readonly explicitlySet: Set<string>;
   readonly valueSources: Map<string, ValueSource>;
   readonly errors: string[];
+  readonly warnings: string[];
+  readonly warned: Set<string>;
   /** Keys whose value came from tokens after `--`. */
   readonly fromRest: Set<string>;
   /**
@@ -474,10 +495,14 @@ interface ParseState {
 }
 
 /** Record that an arg was explicitly given, keeping the occurrence order. */
-function markSet(state: ParseState, key: string): void {
+function markSet(state: ParseState, key: string, spec?: ArgSpec): void {
   state.explicitlySet.add(key);
   state.valueSources.set(key, 'cli');
   state.order?.set(key, state.seq++);
+  if (spec?.deprecation !== undefined && !state.warned.has(key)) {
+    state.warned.add(key);
+    state.warnings.push(spec.deprecation);
+  }
 }
 
 /** Whether a token can serve as a value for this arg rather than starting a new flag. */
@@ -516,7 +541,7 @@ function applyFlagOnly(spec: ArgSpec, negated: boolean, state: ParseState): void
   }
   if (spec.forced !== undefined) {
     state.result[spec.key] = negated ? !spec.forced : spec.forced;
-    markSet(state, spec.key);
+    markSet(state, spec.key, spec);
     return;
   }
   if (spec.isCount) {
@@ -525,7 +550,7 @@ function applyFlagOnly(spec: ArgSpec, negated: boolean, state: ParseState): void
   } else {
     state.result[spec.key] = !negated;
   }
-  markSet(state, spec.key);
+  markSet(state, spec.key, spec);
 }
 
 /** Store one or more parsed values for an arg, honouring the append action. */
@@ -553,14 +578,14 @@ function applyValues(spec: ArgSpec, values: string[], state: ParseState): void {
     state.result[spec.key] = coerceValue(values[0]!, spec.def, name);
   }
 
-  markSet(state, spec.key);
+  markSet(state, spec.key, spec);
 }
 
 /** Apply defaultMissingValue for a flag whose value was omitted (numArgs.min === 0). */
 function applyMissingValue(spec: ArgSpec, state: ParseState): void {
   if (spec.def.defaultMissingValues !== undefined) {
     state.result[spec.key] = [...spec.def.defaultMissingValues];
-    markSet(state, spec.key);
+    markSet(state, spec.key, spec);
     return;
   }
   const fallback = spec.def.defaultMissingValue ?? true;
@@ -572,7 +597,7 @@ function applyMissingValue(spec: ArgSpec, state: ParseState): void {
   } else {
     state.result[spec.key] = fallback;
   }
-  markSet(state, spec.key);
+  markSet(state, spec.key, spec);
 }
 
 /**
@@ -761,7 +786,7 @@ function handleLong(
     if (spec.isBool && negated) {
       // `--no-verbose=true` means "negate", so invert whatever was supplied.
       state.result[spec.key] = coerceValue(inline, spec.def, `--${name}`) === false;
-      markSet(state, spec.key);
+      markSet(state, spec.key, spec);
       return i;
     }
     applyValues(spec, [inline], state);
@@ -912,7 +937,7 @@ function assignPositionals(cmdSpec: CommandSpec, state: ParseState): void {
       if (state.rest.length > 0) {
         state.result[spec.key] = state.rest[0]!;
         state.fromRest.add(spec.key);
-        markSet(state, spec.key);
+        markSet(state, spec.key, spec);
       }
       continue;
     }
@@ -920,7 +945,7 @@ function assignPositionals(cmdSpec: CommandSpec, state: ParseState): void {
     if (spec.def.trailingVarArg) {
       if (index < state.positionals.length) {
         state.result[spec.key] = state.positionals.slice(index);
-        markSet(state, spec.key);
+        markSet(state, spec.key, spec);
         index = state.positionals.length;
       }
       return;
@@ -934,13 +959,13 @@ function assignPositionals(cmdSpec: CommandSpec, state: ParseState): void {
       const take = Math.min(spec.max, state.positionals.length - index);
       const values = state.positionals.slice(index, index + take);
       state.result[spec.key] = values.map((v) => String(coerceValue(v, spec.def, spec.key)));
-      markSet(state, spec.key);
+      markSet(state, spec.key, spec);
       index += take;
       continue;
     }
 
     state.result[spec.key] = coerceValue(state.positionals[index]!, spec.def, spec.key);
-    markSet(state, spec.key);
+    markSet(state, spec.key, spec);
     index++;
   }
 }
@@ -977,6 +1002,29 @@ function applyOverrides(cmdSpec: CommandSpec, state: ParseState): void {
       state.explicitlySet.delete(target);
       order.delete(target);
     }
+  }
+}
+
+/**
+ * Copy each deprecated arg's value to the arg that replaced it, unless that one
+ * was given directly. Lets a rename keep working without the handler caring.
+ */
+function applyReplacements(cmdSpec: CommandSpec, state: ParseState): void {
+  for (const spec of cmdSpec.all) {
+    const target = spec.def.replacedBy;
+    if (target === undefined || !state.explicitlySet.has(spec.key)) {
+      continue;
+    }
+    if (state.explicitlySet.has(target) || !(target in cmdSpec.byKey)) {
+      continue;
+    }
+    const value = state.result[spec.key];
+    if (value === undefined) {
+      continue;
+    }
+    state.result[target] = value;
+    state.explicitlySet.add(target);
+    state.valueSources.set(target, state.valueSources.get(spec.key) ?? 'cli');
   }
 }
 
@@ -1073,6 +1121,8 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
     explicitlySet: new Set<string>(),
     valueSources: new Map<string, ValueSource>(),
     errors: [],
+    warnings: [],
+    warned: new Set<string>(),
     fromRest: new Set<string>(),
     order: cmdSpec.hasOverrides ? new Map<string, number>() : undefined,
     seq: 0,
@@ -1117,6 +1167,7 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
 
   assignPositionals(cmdSpec, state);
   applyOverrides(cmdSpec, state);
+  applyReplacements(cmdSpec, state);
   applyFallbacks(cmdSpec, state);
 
   // Expose both the declared key and its camelCase form.
@@ -1145,6 +1196,7 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
     versionIsShort: state.versionIsShort,
     unknown: state.unknown,
     errors: state.errors,
+    warnings: state.warnings,
     explicitlySet: state.explicitlySet,
     valueSources: state.valueSources,
   };

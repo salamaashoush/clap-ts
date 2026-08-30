@@ -183,6 +183,12 @@ function formatArgSuffix(def: ArgDef): string {
     suffixes.push('[required]');
   }
 
+  if (def.deprecated !== undefined && def.deprecated !== false) {
+    suffixes.push(
+      typeof def.deprecated === 'string' ? `[deprecated: ${def.deprecated}]` : '[deprecated]',
+    );
+  }
+
   return suffixes.length > 0 ? ` ${suffixes.join(' ')}` : '';
 }
 
@@ -675,10 +681,18 @@ function renderSubcommandSection(
       rawLen = name.length + 2;
     }
 
+    const deprecated = def.meta.deprecated;
+    const note =
+      deprecated === undefined || deprecated === false
+        ? ''
+        : typeof deprecated === 'string'
+          ? ` [deprecated: ${deprecated}]`
+          : ' [deprecated]';
+
     subEntries.push({
       label,
       rawLen,
-      desc: def.meta.description ?? '',
+      desc: (def.meta.description ?? '') + note,
       detail: flatten ? flattenedSubcommandArgs(def, styles) : undefined,
     });
   }

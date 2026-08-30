@@ -175,6 +175,16 @@ export interface ArgDef {
   readonly action?: ArgAction;
   /** Hide this argument from all help output. */
   readonly hidden?: boolean;
+  /**
+   * Mark the argument deprecated. Using it warns on stderr and help labels it.
+   * A string is used as the warning's reason.
+   */
+  readonly deprecated?: boolean | string;
+  /**
+   * Name of the argument that supersedes this one. Named in the warning, and
+   * the value is forwarded there when that argument was not given itself.
+   */
+  readonly replacedBy?: string;
   /** Hide this argument from short help (-h) only. */
   readonly hideShortHelp?: boolean;
   /** Hide this argument from long help (--help) only. */
@@ -267,6 +277,13 @@ export interface CommandMeta {
   readonly afterLongHelp?: string;
   /** Hide this command from parent's help subcommand list. */
   readonly hidden?: boolean;
+  /**
+   * Mark the command deprecated. Running it warns on stderr and help labels it.
+   * A string is used as the warning's reason.
+   */
+  readonly deprecated?: boolean | string;
+  /** Name of the command that supersedes this one, named in the warning. */
+  readonly replacedBy?: string;
   /** Visible aliases shown next to the command name in help. */
   readonly aliases?: readonly string[];
   /** Aliases that work but stay out of help. */
@@ -551,6 +568,8 @@ export interface ParseResult {
   readonly unknown: readonly string[];
   /** Errors collected instead of thrown, when meta.ignoreErrors is set. */
   readonly errors: readonly string[];
+  /** Notices to show the user without failing, such as deprecation warnings. */
+  readonly warnings: readonly string[];
   /** Set of arg keys that were explicitly provided (not defaults or env). */
   readonly explicitlySet: ReadonlySet<string>;
   /** Where each parsed value came from, by arg key. */

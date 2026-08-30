@@ -499,6 +499,17 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
 
       parseResult = parseArgs(argv, effectiveCommand);
 
+      for (const warning of parseResult.warnings) {
+        io.stderr.write(`warning: ${warning}\n`);
+      }
+      if (command.meta.deprecated !== undefined && command.meta.deprecated !== false) {
+        const reason =
+          typeof command.meta.deprecated === 'string' ? `: ${command.meta.deprecated}` : '';
+        const instead =
+          command.meta.replacedBy === undefined ? '' : `; use '${command.meta.replacedBy}' instead`;
+        io.stderr.write(`warning: '${command.meta.name}' is deprecated${reason}${instead}\n`);
+      }
+
       // The built-in `help` subcommand: `app help`, `app help sub sub`.
       if (
         parseResult.subCommand === undefined &&

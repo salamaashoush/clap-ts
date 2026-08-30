@@ -29,6 +29,10 @@
     "./config": {
       "types": "./dist/config.d.ts",
       "import": "./dist/config.js"
+    },
+    "./argfile": {
+      "types": "./dist/argfile.d.ts",
+      "import": "./dist/argfile.js"
     }
   },
   "files": [
