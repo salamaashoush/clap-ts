@@ -45,6 +45,18 @@
     "./plugins": {
       "types": "./dist/plugins.d.ts",
       "import": "./dist/plugins.js"
+    },
+    "./output": {
+      "types": "./dist/output.d.ts",
+      "import": "./dist/output.js"
+    },
+    "./log": {
+      "types": "./dist/log.d.ts",
+      "import": "./dist/log.js"
+    },
+    "./progress": {
+      "types": "./dist/progress.d.ts",
+      "import": "./dist/progress.js"
     }
   },
   "files": [
