@@ -74,7 +74,9 @@
     "bench": "bun run bench/parse.bench.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "prepublishOnly": "npm run build",
-    "check:readme": "python3 scripts/check-readme.py"
+    "check:readme": "python3 scripts/check-readme.py",
+    "check:package": "node scripts/check-package.mjs",
+    "ready": "bun run typecheck && bun test && bun run build && bun run check:readme && bun run check:package"
   },
   "keywords": [
     "cli",

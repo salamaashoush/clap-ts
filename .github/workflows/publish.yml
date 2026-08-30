@@ -26,6 +26,26 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # A tag that disagrees with package.json would quietly publish the
+      # version in the file, not the one in the tag.
+      - name: Check the tag matches the package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package.json version $pkg"
+            exit 1
+          fi
+          echo "publishing $pkg"
+
+      - name: Refuse to republish an existing version
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          if npm view "clap-ts@$pkg" version >/dev/null 2>&1; then
+            echo "clap-ts@$pkg is already on npm"
+            exit 1
+          fi
+
       - name: Typecheck
         run: bun run typecheck
 
@@ -34,6 +54,12 @@ jobs:
 
       - name: Build
         run: bun run build
+
+      - name: Typecheck the README examples
+        run: bun run check:readme
+
+      - name: Check the published artifact
+        run: bun run check:package
 
       - name: Publish to npm
         run: npm publish --provenance --access public

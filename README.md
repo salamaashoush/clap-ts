@@ -1357,7 +1357,11 @@ ergonomics around it. What is left is polish:
 ## Requirements
 
 - Node.js >= 20.0.0 or Bun >= 1.0
-- TypeScript >= 5.0 (for `const` type parameter inference)
+- TypeScript >= 5.0, for `const` type parameter inference
+- ESM only. A CommonJS file has to reach it through a dynamic `import()`; the
+  package sets `"type": "module"` and ships no CJS build.
+
+Type resolution is verified against `nodenext`, `node16` and `bundler`.
 
 ## License
 
