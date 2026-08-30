@@ -168,7 +168,7 @@ function formatArgSuffix(def: ArgDef): string {
   }
 
   if (def.env && !def.hideEnv) {
-    const current = def.hideEnvValues ? undefined : process.env[def.env];
+    const current = def.hideEnvValues || def.secret ? undefined : process.env[def.env];
     suffixes.push(current ? `[env: ${def.env}=${current}]` : `[env: ${def.env}]`);
   }
 

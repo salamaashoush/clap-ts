@@ -29,9 +29,10 @@ export type ArgAction =
 
 /**
  * Where a parsed value came from. Extends clap's ValueSource with 'config',
- * which sits between an environment variable and a default.
+ * which sits between an environment variable and a default, and 'prompt' for a
+ * value the user typed when asked.
  */
-export type ValueSource = 'cli' | 'env' | 'config' | 'default';
+export type ValueSource = 'cli' | 'env' | 'config' | 'prompt' | 'default';
 
 /** Min/max constraint for number of values an argument accepts. */
 export interface NumArgs {
@@ -195,6 +196,11 @@ export interface ArgDef {
   readonly hideDefaultValue?: boolean;
   /** Hide the [env: ...] note from help. */
   readonly hideEnv?: boolean;
+  /**
+   * Treat the value as sensitive: masked when prompted for, and its
+   * environment variable's value kept out of help.
+   */
+  readonly secret?: boolean;
   /** Show [env: VAR] in help without the variable's current value. */
   readonly hideEnvValues?: boolean;
   /** Description for the --no-X variant of boolean flags. */
@@ -538,6 +544,28 @@ export interface RunOptions {
   readonly config?:
     | Record<string, unknown>
     | (() => Record<string, unknown> | undefined);
+  /**
+   * Supply values for required arguments still missing after argv, the
+   * environment and the config have had their turn. Returning a record fills
+   * them in with source 'prompt'; returning undefined leaves validation to
+   * fail as it would have.
+   *
+   * `promptMissing` from `clap-ts/prompt` is the intended implementation.
+   */
+  readonly fillMissing?: (
+    missing: readonly MissingArg[],
+    command: CommandDef<any>,
+  ) => Promise<Record<string, unknown> | undefined>;
+}
+
+/** A required argument that nothing has supplied yet. */
+export interface MissingArg {
+  /** Key in the command's `args`. */
+  readonly key: string;
+  /** The argument's definition. */
+  readonly def: ArgDef;
+  /** How it reads in a message: `--port` or `<FILE>`. */
+  readonly label: string;
 }
 
 // ---- Parser Result ----

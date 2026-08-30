@@ -16,6 +16,7 @@ export type {
   ValueSource,
   Shell,
   OutputSink,
+  MissingArg,
   ArgDef,
   ArgsDef,
   StyleFn,

@@ -13,6 +13,7 @@ import type {
   ParsedArgs,
   ParseResult,
   OutputSink,
+  MissingArg,
   RunOptions,
   StylesDef,
   ValueSource,
@@ -177,6 +178,59 @@ function applyConfig(
   }
 
   return changed ? { ...result, args, valueSources } : result;
+}
+
+/** Required args that argv, the environment and the config all left empty. */
+function missingRequired(command: CommandDef, result: ParseResult): MissingArg[] {
+  const argsDef: ArgsDef = command.args ?? {};
+  const missing: MissingArg[] = [];
+
+  for (const key of Object.keys(argsDef)) {
+    const def = argsDef[key]!;
+    if (def.required !== true || result.args[key] !== undefined) {
+      continue;
+    }
+    // requiredUnlessPresent and friends may excuse it; leave those to validate.
+    if (def.requiredUnlessPresent !== undefined || def.requiredUnlessPresentAll !== undefined) {
+      continue;
+    }
+    missing.push({
+      key,
+      def,
+      label: def.type === 'positional' ? `<${def.valueName ?? key}>` : `--${def.long ?? key}`,
+    });
+  }
+  return missing;
+}
+
+/** Fold values supplied by a fillMissing hook into the result. */
+function applyFilled(
+  result: ParseResult,
+  command: CommandDef,
+  filled: Record<string, unknown>,
+): ParseResult {
+  const argsDef: ArgsDef = command.args ?? {};
+  const args = { ...result.args };
+  const explicitlySet = new Set(result.explicitlySet);
+  const valueSources = new Map(result.valueSources);
+
+  for (const key of Object.keys(filled)) {
+    const def = argsDef[key];
+    const raw = filled[key];
+    if (def === undefined || raw === undefined) {
+      continue;
+    }
+    const name = def.type === 'positional' ? `<${def.valueName ?? key}>` : `--${def.long ?? key}`;
+    const coerce = (value: unknown): string | number | boolean =>
+      typeof value === 'boolean' ? value : coerceValue(String(value), def, `prompt:${name}`);
+
+    args[key] = Array.isArray(raw) ? raw.map((v) => String(coerce(v))) : coerce(raw);
+    args[kebabToCamel(key)] = args[key]!;
+    explicitlySet.add(key);
+    valueSources.set(key, 'prompt');
+  }
+
+  return { ...result, args, explicitlySet, valueSources };
 }
 
 // ---- Global Args ----
@@ -664,6 +718,17 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
         ...parentNames.slice(1),
         ...(parentNames.length > 0 ? [command.meta.name] : []),
       ]);
+    }
+
+    // Last chance to supply what is still missing, before validation says no.
+    if (opts?.fillMissing !== undefined) {
+      const missing = missingRequired(effectiveCommand, finalResult);
+      if (missing.length > 0) {
+        const filled = await opts.fillMissing(missing, effectiveCommand);
+        if (filled !== undefined) {
+          finalResult = applyFilled(finalResult, effectiveCommand, filled);
+        }
+      }
     }
 
     // Validate parsed args

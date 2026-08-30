@@ -57,6 +57,10 @@
     "./progress": {
       "types": "./dist/progress.d.ts",
       "import": "./dist/progress.js"
+    },
+    "./prompt": {
+      "types": "./dist/prompt.d.ts",
+      "import": "./dist/prompt.js"
     }
   },
   "files": [
