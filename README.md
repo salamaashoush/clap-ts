@@ -739,7 +739,10 @@ runMain(rootCommand, {
 For advanced use cases, you can use the parser and validator directly:
 
 ```ts
-import { parseArgs, validate, renderHelp, CliParseError } from 'clap-ts';
+import {
+  parseArgs, validate, renderHelp, CliParseError,
+  subCommandsOf, hasSubCommands, possibleValues,
+} from 'clap-ts';
 
 const command = defineCommand({
   meta: { name: 'tool' },

@@ -38,6 +38,10 @@ export {
   getRawArgs,
   collectGlobalArgs,
   mergeGlobalArgs,
+  subCommandsOf,
+  hasSubCommands,
+  possibleValues,
+  matchesPossibleValue,
   CliParseError,
 } from './parser.js';
 

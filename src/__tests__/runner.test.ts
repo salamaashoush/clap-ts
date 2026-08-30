@@ -4,7 +4,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { defineCommand, defineArgs, defineArg, runCommand, runMain } from '../runner.js';
-import { parseArgs } from '../parser.js';
+import { parseArgs, subCommandsOf, hasSubCommands } from '../parser.js';
 import { validate } from '../validation.js';
 import { renderHelp } from '../help.js';
 import type { ArgsDef, CommandDef, ParsedArgs } from '../types.js';
@@ -458,5 +458,30 @@ describe('externalSubcommandValueParser', () => {
       process.stderr.write = originalWrite;
     }
     expect(err).toContain("invalid value 'x': nope");
+  });
+});
+
+describe('public introspection helpers', () => {
+  test('subCommandsOf resolves lazy and eager alike', () => {
+    const eager: CommandDef = { meta: { name: 'a' }, subCommands: { x: { meta: { name: 'x' } } } };
+    const lazy: CommandDef = { meta: { name: 'b' }, lazySubCommands: () => ({ y: { meta: { name: 'y' } } }) };
+    const none: CommandDef = { meta: { name: 'c' } };
+    expect(Object.keys(subCommandsOf(eager))).toEqual(['x']);
+    expect(Object.keys(subCommandsOf(lazy))).toEqual(['y']);
+    expect(Object.keys(subCommandsOf(none))).toEqual([]);
+  });
+
+  test('hasSubCommands answers without running the thunk', () => {
+    let built = 0;
+    const lazy: CommandDef = {
+      meta: { name: 'b' },
+      lazySubCommands: () => {
+        built++;
+        return { y: { meta: { name: 'y' } } };
+      },
+    };
+    expect(hasSubCommands(lazy)).toBe(true);
+    expect(built).toBe(0);
+    expect(hasSubCommands({ meta: { name: 'c' } })).toBe(false);
   });
 });
