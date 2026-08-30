@@ -2,7 +2,7 @@
 
 A type-safe CLI argument parser for TypeScript, inspired by Rust's [clap](https://docs.rs/clap/latest/clap/) crate.
 
-Full clap-style parsing, validation, help generation, and subcommand support. Zero runtime dependencies -- built on `node:util parseArgs` with a rich layer on top.
+Full clap-style parsing, validation, help generation, and subcommand support. Zero runtime dependencies, with its own tokenizer rather than `node:util parseArgs`.
 
 ## Features
 
@@ -21,9 +21,15 @@ Full clap-style parsing, validation, help generation, and subcommand support. Ze
 - **Global args** -- `global: true` args inherited by all subcommands
 - **Reusable arg groups** -- `defineArgs()` + spread for sharing args across commands
 - **Trailing var args** -- last positional consumes all remaining args
-- **Negative numbers** -- `--offset -10` with `allowNegativeNumbers`
+- **Negative numbers** -- `--offset -10` with `allowNegativeNumbers`, positionals included
 - **Hyphen values** -- `--grep -pattern` with `allowHyphenValues`
-- **Zero dependencies** -- only uses `node:util` (parseArgs + styleText)
+- **Multi-value options** -- `numArgs: { min: 3, max: 3 }` consumes `--point 1 2 3`
+- **Value terminators** -- `--cmds ls -la ; file` with `valueTerminator: ';'`
+- **Overrides** -- `overridesWith` lets the later flag win
+- **Possible values with help** -- `valueParser` entries carrying help text, aliases and `hidden`
+- **Built-in help subcommand** -- `app help serve`, alongside `-h` and `--help`
+- **Flag subcommands** -- `pacman -S` style via `shortFlag` and `longFlag`
+- **Zero dependencies** -- only uses `node:util` (styleText, for colour detection)
 - **Bun and Node.js** -- works on both runtimes
 
 ## Install
@@ -116,7 +122,14 @@ const cmd = defineCommand({
     beforeHelp: 'NOTE: Requires auth.',       // text before help output
     afterHelp: 'Examples:\n  serve -p 8080',  // text after help output
     hidden: false,                            // hide from parent help
-    aliases: ['s', 'start'],                  // subcommand aliases
+    aliases: ['s', 'start'],                  // subcommand aliases, shown in help
+    hiddenAliases: ['srv'],                   // aliases that work but stay hidden
+    author: 'Salama Ashoush',                 // available to templates as {author}
+    longVersion: '1.0.0 (build abc123)',      // --version; -V still shows `version`
+    propagateVersion: true,                   // subcommands inherit this version
+    displayOrder: 1,                          // position among sibling subcommands
+    shortFlag: 's',                           // invoke as `tool -s`
+    longFlag: 'serve',                        // invoke as `tool --serve`
 
     // Subcommand behavior
     subcommandRequired: true,                 // error if no subcommand
@@ -126,9 +139,30 @@ const cmd = defineCommand({
     subcommandNegatesReqs: true,              // subcommand waives parent required args
     argsConflictsWithSubcommands: true,       // args and subcommands mutually exclusive
     argRequiredElseHelp: true,                // show help if no args provided
+    subcommandPrecedenceOverArg: true,        // a subcommand name ends value collection
+    multicall: true,                          // dispatch on the invoked binary name
+    noBinaryName: true,                       // argv carries no binary name to strip
+
+    // Parsing behavior
+    allowHyphenValues: true,                  // every arg may take -values
+    allowNegativeNumbers: true,               // every arg may take negative numbers
+    allowMissingPositional: true,             // `cp DEST` fills the trailing positional
+    argsOverrideSelf: true,                   // repeating an arg replaces, not errors
 
     // Help customization
     helpTemplate: '{name} v{version}\n{usage}\n{options}',
+    beforeLongHelp: 'Shown only with --help',
+    afterLongHelp: 'Shown only with --help',
+    subcommandHelpHeading: 'Operations',      // default "Commands"
+    subcommandValueName: 'OP',                // usage placeholder, default "COMMAND"
+    overrideUsage: 'serve <FILE> [--port N]', // replace the usage line
+    overrideHelp: '...',                      // replace the whole help output
+    termWidth: 100,                           // fixed help width
+    maxTermWidth: 120,                        // cap on the detected terminal width
+    disableHelpFlag: true,                    // drop the built-in -h/--help
+    disableVersionFlag: true,                 // drop the built-in -V/--version
+    disableHelpSubcommand: true,              // drop the built-in `help` subcommand
+    disableColoredHelp: true,                 // render help without colour
   },
   args: { /* ... */ },
   subCommands: { /* ... */ },
@@ -286,9 +320,75 @@ const cmd = defineCommand({
       hidePossibleValues: true,
       description: 'Output format',
     },
+
+    // Multi-value option: --point 1 2 3
+    point: {
+      type: 'string',
+      numArgs: { min: 3, max: 3 },
+      valueNames: ['X', 'Y', 'Z'],   // help shows --point <X> <Y> <Z>
+      description: 'Coordinates',
+    },
+
+    // Value terminator: --cmds ls -la ; file.txt
+    cmds: {
+      type: 'string',
+      action: 'append',
+      numArgs: { min: 1, max: 99 },
+      allowHyphenValues: true,
+      valueTerminator: ';',
+      description: 'Command to run',
+    },
+
+    // Require the equals form: --key=value, never --key value
+    key: {
+      type: 'string',
+      requireEquals: true,
+      description: 'API key',
+    },
+
+    // Possible values carrying help text, aliases and hidden entries
+    mode: {
+      type: 'string',
+      ignoreCase: true,              // --mode FAST matches 'fast'
+      valueParser: [
+        { name: 'fast', help: 'Skip the slow checks' },
+        { name: 'thorough', aliases: ['full'] },
+        { name: 'legacy', hidden: true },
+      ],
+      description: 'Build mode',
+    },
+
+    // The later of the two wins
+    dev: { type: 'boolean', overridesWith: ['release'] },
+    release: { type: 'boolean', overridesWith: ['dev'] },
+
+    // Help presentation
+    bind: {
+      type: 'string',
+      longDescription: 'The longer explanation, shown with --help only',
+      displayOrder: 1,               // position within its help section
+      nextLineHelp: true,            // description on its own line
+      hideDefaultValue: true,        // drop the [default: ...] note
+      description: 'Address to bind',
+    },
+    token: {
+      type: 'string',
+      env: 'TOOL_TOKEN',
+      hideEnvValues: true,           // show [env: TOOL_TOKEN], not its value
+      description: 'API token',
+    },
+
+    // Explicit positional position, and group membership
+    dest: { type: 'positional', index: 2 },
+    src: { type: 'positional', index: 1 },
+    yaml: { type: 'boolean', groups: ['format'] },
   },
 });
 ```
+
+By default a value shown for `env` in help includes the variable's current value,
+matching clap. Use `hideEnvValues` to show only the name, or `hideEnv` to drop the
+note entirely, when the variable holds a secret.
 
 ### Argument Constraints
 
@@ -721,22 +821,28 @@ Placeholders: `{name}`, `{version}`, `{about}`, `{usage}`, `{all-args}`, `{argum
 
 ## Performance
 
-clap-ts is built for performance. Core parsing delegates to the native `node:util parseArgs` and adds a thin layer for type coercion, env fallback, and validation. Flag lookup uses precomputed `Map`s for O(1) resolution. All new feature fields short-circuit on `undefined` -- zero overhead when unused.
+Parsing is a single pass over argv against a spec compiled once per command and
+cached, so flag lookup, value counts and camelCase keys are all resolved ahead of
+time. Feature fields short-circuit on `undefined`, so an unused one costs nothing.
 
-Benchmarks on Apple M3 Pro (Bun 1.3):
+Earlier versions delegated to `node:util parseArgs`, which re-validates its whole
+`options` object on every call, roughly 170ns per declared option regardless of how
+long argv is. A 33-option command spent 5.8us there before reading a single token.
 
-| Scenario | Time |
-|----------|------|
-| Minimal (no args) | ~1.7us |
-| Simple (5 flags) | ~11us |
-| Complex (22 flags) | ~16us |
-| Subcommand detection | ~12us |
-| Full pipeline (parse + validate) | ~26us |
+Benchmarks on AMD Ryzen 9 9950X3D (Bun 1.4), against that `node:util` baseline:
+
+| Scenario | Before | After | Change |
+|----------|--------|-------|--------|
+| Minimal (no args) | 1.47us | 28ns | 52x |
+| Simple (5 flags) | 9.01us | 443ns | 20x |
+| Complex (22 flags) | 14.15us | 1.46us | 9.7x |
+| Subcommand detection | 9.96us | 350ns | 28x |
+| Full pipeline (parse + validate) | 23.01us | 1.27us | 18x |
 
 To run benchmarks yourself:
 
 ```bash
-bun run bench/parse.bench.ts
+bun run bench
 ```
 
 ## Comparison with Rust clap
@@ -788,14 +894,62 @@ bun run bench/parse.bench.ts
 | hideShortHelp / hideLongHelp | Yes | Yes |
 | hidePossibleValues | Yes | Yes |
 | Hidden args/commands | Yes | Yes |
+| Multi-token numArgs (`--point 1 2 3`) | Yes | Yes |
+| requireEquals | Yes | Yes |
+| valueTerminator | Yes | Yes |
+| overridesWith | Yes | Yes |
+| ignoreCase | Yes | Yes |
+| Possible values with help/aliases | Yes | Yes |
+| valueNames, index, displayOrder, nextLineHelp | Yes | Yes |
+| hideDefaultValue / hideEnv / hideEnvValues | Yes | Yes |
+| defaultValueIfs, requiredIfEqAny/All | Yes | Yes |
+| Arg-level group membership | Yes | Yes |
+| Group conflictsWith / requires | Yes | Yes |
+| Built-in `help` subcommand | Yes | Yes |
+| disableHelpFlag / disableVersionFlag | Yes | Yes |
+| termWidth / maxTermWidth | Yes | Yes |
+| overrideUsage / overrideHelp | Yes | Yes |
+| propagateVersion / longVersion | Yes | Yes |
+| Flag subcommands (`pacman -S`) | Yes | Yes |
+| allowMissingPositional | Yes | Yes |
+| argsOverrideSelf | Yes | Yes |
+| subcommandPrecedenceOverArg | Yes | Yes |
+| multicall / noBinaryName | Yes | Yes |
 | Type-safe parsed args | derive macro | generics |
 | Shell completions (bash/zsh/fish/powershell) | Yes | Yes |
+| Shell completions (elvish, nushell) | Yes | Not yet |
 | Man page generation | Yes | Not yet |
+| Value source (CLI vs env vs default) | Yes | Not yet |
+| flattenHelp, ignoreErrors, deferred building | Yes | Not yet |
 
 ## Roadmap
 
 - Man page generation
+- Elvish and nushell completions
+- Exposing the value source on `CommandContext`
 - Markdown help output
+
+## Upgrading from 0.2
+
+The parser was rewritten to tokenize argv directly, which brought several defaults
+in line with clap. Each of these was previously wrong or silently permissive:
+
+- `--version` and `-V` exist only where `meta.version` is set. A subcommand that
+  needs the root's version should set `propagateVersion: true` on the root.
+- Repeating a single-value arg is an error. `argsOverrideSelf: true` restores the
+  old behaviour of keeping the last one.
+- A flag missing its value is an error. `--name` with nothing after it used to
+  yield the boolean `true` in a string-typed arg, and `--name --verbose` used to
+  swallow the next flag as the value.
+- `--flag=true` is now `true`. Every `--flag=<value>` form used to yield `false`.
+- `-p=80` yields `80`. The leading `=` used to end up in the value.
+- Flags before a subcommand no longer break dispatch. `app --verbose serve` used
+  to run nothing at all, and a subcommand's flags are now parsed against the
+  subcommand rather than its parent.
+- `global: true` args declared on an intermediate command now reach its
+  grandchildren, not just the root's.
+- Errors print the usage line of the command that failed rather than the root's.
+- Help shows `[env: VAR=value]`; see `hideEnvValues` and `hideEnv`.
 
 ## Requirements
 
