@@ -4,6 +4,9 @@
 
 import { describe, test, expect } from 'bun:test';
 import { defineCommand, defineArgs, defineArg, runCommand, runMain } from '../runner.js';
+import { parseArgs } from '../parser.js';
+import { validate } from '../validation.js';
+import { renderHelp } from '../help.js';
 import type { ArgsDef, ParsedArgs } from '../types.js';
 
 // ---- defineCommand ----
@@ -216,7 +219,7 @@ async function captureStderr(fn: () => Promise<void>): Promise<string> {
 
 describe('flags before a subcommand', () => {
   test('parent flags do not block dispatch', async () => {
-    let port: number | undefined;
+    const seen: (number | undefined)[] = [];
     const root = defineCommand({
       meta: { name: 'app' },
       args: { verbose: { type: 'boolean', short: 'v' } },
@@ -225,17 +228,16 @@ describe('flags before a subcommand', () => {
           meta: { name: 'serve' },
           args: { port: { type: 'number', default: 80 } },
           run({ args }) {
-            port = args.port;
+            seen.push(args.port);
           },
         }),
       },
     });
 
     for (const argv of [['serve'], ['--verbose', 'serve'], ['-v', 'serve']]) {
-      port = undefined;
       await runMain(root, { argv, exit: false });
-      expect(port).toBe(80);
     }
+    expect(seen).toEqual([80, 80, 80]);
   });
 });
 
@@ -290,5 +292,28 @@ describe('error output names the failing command', () => {
     );
     expect(err).toContain('Usage: app serve');
     expect(err).toContain("a similar argument exists: '--port'");
+  });
+});
+
+describe('low-level API accepts a defineCommand result', () => {
+  test('parseArgs, validate and renderHelp take a command with typed hooks', () => {
+    // A regression guard for hook contravariance: CommandDef<{port: ...}> has to
+    // stay assignable to the CommandDef<ArgsDef> these three declare. This is a
+    // compile-time assertion; tsconfig.test.json is what enforces it.
+    const command = defineCommand({
+      meta: { name: 'tool' },
+      args: { port: { type: 'number', default: 3000 } },
+      setup() {},
+      run({ args }) {
+        void args.port;
+      },
+      cleanup() {},
+    });
+
+    const result = parseArgs(['--port', '8080'], command);
+    validate(result, command);
+
+    expect(result.args.port).toBe(8080);
+    expect(renderHelp(command)).toContain('--port');
   });
 });

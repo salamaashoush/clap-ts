@@ -368,12 +368,15 @@ export interface CommandDef<T extends ArgsDef = ArgsDef> {
   readonly subCommands?: Record<string, CommandDef<any>>;
   /** Argument groups for validation and help grouping. */
   readonly groups?: readonly ArgGroup[];
+  // Method syntax, not arrow properties: it makes the parameter bivariant, so a
+  // CommandDef<{port: ...}> from defineCommand can still be passed to parseArgs,
+  // validate and renderHelp, which take CommandDef<ArgsDef>.
   /** Called before run. Return value is ignored; throw to abort. */
-  readonly setup?: (ctx: CommandContext<T>) => void | Promise<void>;
+  setup?(ctx: CommandContext<T>): void | Promise<void>;
   /** Main command handler. */
-  readonly run?: (ctx: CommandContext<T>) => void | Promise<void>;
+  run?(ctx: CommandContext<T>): void | Promise<void>;
   /** Called after run (even on error). */
-  readonly cleanup?: (ctx: CommandContext<T>) => void | Promise<void>;
+  cleanup?(ctx: CommandContext<T>): void | Promise<void>;
 }
 
 // ---- Options ----

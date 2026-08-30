@@ -20,7 +20,7 @@
     "build": "tsc",
     "test": "bun test",
     "bench": "bun run bench/parse.bench.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
