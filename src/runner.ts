@@ -14,6 +14,7 @@ import type {
   ParseResult,
   RunOptions,
   StylesDef,
+  ValueSource,
 } from './types.js';
 import {
   CliParseError,
@@ -142,6 +143,7 @@ function applyInheritedGlobals(
 
   const args = { ...result.args };
   const explicitlySet = new Set(result.explicitlySet);
+  const valueSources = new Map(result.valueSources);
   for (const [key, value] of inherited) {
     if (explicitlySet.has(key)) {
       continue;
@@ -149,9 +151,10 @@ function applyInheritedGlobals(
     args[kebabToCamel(key)] = value;
     args[key] = value;
     explicitlySet.add(key);
+    valueSources.set(key, 'cli');
   }
 
-  return { ...result, args, explicitlySet };
+  return { ...result, args, explicitlySet, valueSources };
 }
 
 // ---- runCommand ----
@@ -165,12 +168,14 @@ export async function runCommand<T extends ArgsDef>(
   args: ParsedArgs<T>,
   rawArgs: readonly string[] = [],
   subCommand?: string,
+  valueSources: ReadonlyMap<string, ValueSource> = new Map(),
 ): Promise<void> {
   const ctx: CommandContext<T> = {
     rawArgs,
     args,
     cmd: command,
     subCommand,
+    valueSources,
     data: {},
   };
 
@@ -443,6 +448,7 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
           parseResult.args as ParsedArgs<ArgsDef>,
           parseResult.subCommandArgs,
           externalSubcommand,
+          parseResult.valueSources,
         );
       }
       if (shouldExit) {
@@ -522,7 +528,13 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
     validate(finalResult, effectiveCommand);
 
     // Run the command
-    await runCommand(effectiveCommand, finalResult.args as ParsedArgs<ArgsDef>, rawArgs);
+    await runCommand(
+      effectiveCommand,
+      finalResult.args as ParsedArgs<ArgsDef>,
+      rawArgs,
+      undefined,
+      finalResult.valueSources,
+    );
 
     // If the command's run() didn't call process.exit() itself, exit cleanly.
     // This prevents the process from hanging when the caller uses `void runMain()`

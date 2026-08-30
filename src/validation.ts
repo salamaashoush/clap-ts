@@ -58,7 +58,11 @@ function buildValidationSpec(command: CommandDef): ValidationSpec {
     if (def.conflictsWith && def.conflictsWith.length > 0) {
       conflicts.push(entry);
     }
-    if (def.requires && def.requires.length > 0) {
+    if (
+      (def.requires && def.requires.length > 0) ||
+      def.requiresIf !== undefined ||
+      def.requiresIfs !== undefined
+    ) {
       requires.push(entry);
     }
     // The parser enforces numArgs per occurrence while consuming tokens, the
@@ -433,12 +437,28 @@ function validateRequires(
   args: Record<string, string | number | boolean | string[]>,
 ): void {
   for (const [key, def] of spec.requires) {
-    if (!isArgSet(args[key], def.type)) {
+    const own = args[key];
+    if (!isArgSet(own, def.type)) {
       continue;
     }
 
+    // requires applies whenever the arg is present; requiresIf only when it
+    // holds a particular value.
+    const needed: string[] = [...(def.requires ?? [])];
+    const ownValue = String(own);
+    if (def.requiresIf && def.requiresIf[0] === ownValue) {
+      needed.push(def.requiresIf[1]);
+    }
+    if (def.requiresIfs) {
+      for (const [whenValue, requiredKey] of def.requiresIfs) {
+        if (whenValue === ownValue) {
+          needed.push(requiredKey);
+        }
+      }
+    }
+
     const missing: string[] = [];
-    for (const requiredKey of def.requires!) {
+    for (const requiredKey of needed) {
       const requiredDef = argsDef[requiredKey];
       if (!isArgSet(args[requiredKey], requiredDef?.type)) {
         missing.push(`--${requiredDef?.long ?? requiredKey}`);
@@ -485,10 +505,11 @@ function collectGroups(command: CommandDef, argsDef: ArgsDef): readonly ArgGroup
   const byName = new Map<string, string[]>();
 
   for (const key of Object.keys(argsDef)) {
-    const memberships = argsDef[key]!.groups;
-    if (!memberships) {
+    const def = argsDef[key]!;
+    if (def.group === undefined && def.groups === undefined) {
       continue;
     }
+    const memberships = def.group === undefined ? def.groups! : [def.group, ...(def.groups ?? [])];
     for (const name of memberships) {
       const members = byName.get(name);
       if (members === undefined) {

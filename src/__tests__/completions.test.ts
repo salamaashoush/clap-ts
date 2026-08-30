@@ -368,3 +368,95 @@ describe('withCompletions', () => {
     expect(wrapped.subCommands!['completions']).toBeDefined();
   });
 });
+
+// ---- Elvish and nushell ----
+
+describe('elvish completions', () => {
+  const command: CommandDef = {
+    meta: { name: 'demo', version: '1.0', description: 'A demo' },
+    args: {
+      verbose: { type: 'boolean', short: 'v', description: 'Verbose' },
+      secret: { type: 'string', hidden: true },
+    },
+    subCommands: {
+      serve: { meta: { name: 'serve', description: 'Serve', aliases: ['s'] } },
+      ghost: { meta: { name: 'ghost', hidden: true } },
+    },
+  };
+  const script = generateCompletions(command, 'elvish');
+
+  test('registers an arg completer for the binary', () => {
+    expect(script).toContain('set edit:completion:arg-completer[demo] =');
+  });
+
+  test('keys each command path with semicolons', () => {
+    expect(script).toContain("&'demo'=");
+    expect(script).toContain("&'demo;serve'=");
+  });
+
+  test('emits both flag forms with their help', () => {
+    expect(script).toContain("cand -v 'Verbose'");
+    expect(script).toContain("cand --verbose 'Verbose'");
+  });
+
+  test('includes subcommand aliases', () => {
+    expect(script).toContain("cand s 'Serve'");
+  });
+
+  test('never suggests hidden args or commands', () => {
+    expect(script).not.toContain('--secret');
+    expect(script).not.toContain("cand ghost");
+  });
+
+  test('but a hidden command still completes its own flags once typed', () => {
+    // Matching clap: hidden only means unlisted, the command still works.
+    expect(script).toContain("&'demo;ghost'=");
+  });
+});
+
+describe('nushell completions', () => {
+  const command: CommandDef = {
+    meta: { name: 'demo', version: '1.0', description: 'A demo' },
+    args: {
+      verbose: { type: 'boolean', short: 'v', description: 'Verbose' },
+      out: { type: 'string', valueHint: 'filePath' },
+      dir: { type: 'string', valueHint: 'dirPath' },
+      file: { type: 'positional', required: true, description: 'Input' },
+    },
+    subCommands: {
+      serve: {
+        meta: { name: 'serve', description: 'Serve' },
+        args: { mode: { type: 'string', valueParser: ['fast', 'safe'] } },
+      },
+    },
+  };
+  const script = generateCompletions(command, 'nushell');
+
+  test('wraps the externs in a module', () => {
+    expect(script).toContain('module completions {');
+    expect(script).toContain('export use completions *');
+  });
+
+  test('declares one extern per command path', () => {
+    expect(script).toContain('export extern "demo" [');
+    expect(script).toContain('export extern "demo serve" [');
+  });
+
+  test('pairs short and long flag forms', () => {
+    expect(script).toContain('--verbose(-v)');
+  });
+
+  test('maps value hints to nushell types', () => {
+    expect(script).toContain('--out: path');
+    expect(script).toContain('--dir: directory');
+  });
+
+  test('includes positionals with their optionality', () => {
+    expect(script).toContain('file: string # Input');
+  });
+
+  test('scopes a value completer to its command path', () => {
+    expect(script).toContain('def "nu-complete demo serve mode" []');
+    expect(script).toContain('[ "fast" "safe" ]');
+  });
+});

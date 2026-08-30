@@ -17,7 +17,14 @@
  * possible values) live in validation.ts.
  */
 
-import type { ArgDef, ArgsDef, ParseResult, CommandDef, PossibleValue } from './types.js';
+import type {
+  ArgDef,
+  ArgsDef,
+  ParseResult,
+  CommandDef,
+  PossibleValue,
+  ValueSource,
+} from './types.js';
 
 // ---- Error ----
 
@@ -117,6 +124,10 @@ interface ArgSpec {
   readonly camel: string;
   /** Whether a second occurrence of this arg should be rejected. */
   readonly repeatIsError: boolean;
+  /** Fixed boolean this flag forces, for the setTrue and setFalse actions. */
+  readonly forced?: boolean;
+  /** Built-in output this arg triggers, for the help and version actions. */
+  readonly triggers?: 'help' | 'helpShort' | 'helpLong' | 'version';
   /** Built-in flag this spec stands for, if any. */
   readonly builtin?: 'help' | 'version';
 }
@@ -153,11 +164,22 @@ interface CommandSpec {
 
 const specCache = new WeakMap<CommandDef, CommandSpec>();
 
+/** Actions that stand alone: the flag carries no value of its own. */
+const VALUELESS_ACTIONS = new Set<string>([
+  'count',
+  'setTrue',
+  'setFalse',
+  'help',
+  'helpShort',
+  'helpLong',
+  'version',
+]);
+
 function valueCounts(def: ArgDef): { min: number; max: number } {
   if (def.numArgs) {
     return { min: def.numArgs.min, max: def.numArgs.max };
   }
-  if (def.type === 'boolean' || def.action === 'count') {
+  if (def.type === 'boolean' || (def.action !== undefined && VALUELESS_ACTIONS.has(def.action))) {
     return { min: 0, max: 0 };
   }
   return { min: 1, max: 1 };
@@ -166,13 +188,23 @@ function valueCounts(def: ArgDef): { min: number; max: number } {
 function makeSpec(key: string, def: ArgDef, argsOverrideSelf: boolean): ArgSpec {
   const { min, max } = valueCounts(def);
   const isAppend = def.action === 'append';
+  const forced =
+    def.action === 'setTrue' ? true : def.action === 'setFalse' ? false : undefined;
+  const triggers =
+    def.action === 'help' || def.action === 'helpShort' || def.action === 'helpLong'
+      ? def.action
+      : def.action === 'version'
+        ? ('version' as const)
+        : undefined;
   return {
+    forced,
+    triggers,
     key,
     def,
     long: def.long ?? key,
     camel: kebabToCamel(key),
     repeatIsError: !isAppend && !argsOverrideSelf && def.overridesWith === undefined,
-    isBool: def.type === 'boolean' && def.action !== 'count',
+    isBool: def.type === 'boolean' && !VALUELESS_ACTIONS.has(def.action ?? ''),
     isCount: def.action === 'count',
     isAppend,
     min,
@@ -384,6 +416,7 @@ function displayName(spec: ArgSpec): string {
 interface ParseState {
   readonly result: Record<string, string | number | boolean | string[]>;
   readonly explicitlySet: Set<string>;
+  readonly valueSources: Map<string, ValueSource>;
   /**
    * Arg key -> sequence number of its last explicit occurrence. Only built when
    * some arg declares overridesWith, so the common parse allocates no Map.
@@ -405,6 +438,7 @@ interface ParseState {
 /** Record that an arg was explicitly given, keeping the occurrence order. */
 function markSet(state: ParseState, key: string): void {
   state.explicitlySet.add(key);
+  state.valueSources.set(key, 'cli');
   state.order?.set(key, state.seq++);
 }
 
@@ -429,12 +463,22 @@ function isValueToken(token: string, spec: ArgSpec, cmdSpec: CommandSpec): boole
 
 /** Record a flag occurrence that carries no value: booleans and counts. */
 function applyFlagOnly(spec: ArgSpec, negated: boolean, state: ParseState): void {
-  if (spec.builtin === 'help') {
+  if (spec.builtin === 'help' || spec.triggers === 'help' || spec.triggers === 'helpLong') {
     state.helpRequested = true;
     return;
   }
-  if (spec.builtin === 'version') {
+  if (spec.triggers === 'helpShort') {
+    state.helpRequested = true;
+    state.helpIsShort = true;
+    return;
+  }
+  if (spec.builtin === 'version' || spec.triggers === 'version') {
     state.versionRequested = true;
+    return;
+  }
+  if (spec.forced !== undefined) {
+    state.result[spec.key] = negated ? !spec.forced : spec.forced;
+    markSet(state, spec.key);
     return;
   }
   if (spec.isCount) {
@@ -481,6 +525,11 @@ function applyValues(
 
 /** Apply defaultMissingValue for a flag whose value was omitted (numArgs.min === 0). */
 function applyMissingValue(spec: ArgSpec, state: ParseState): void {
+  if (spec.def.defaultMissingValues !== undefined) {
+    state.result[spec.key] = [...spec.def.defaultMissingValues];
+    markSet(state, spec.key);
+    return;
+  }
   const fallback = spec.def.defaultMissingValue ?? true;
   if (spec.isAppend) {
     const previous = state.result[spec.key];
@@ -829,6 +878,7 @@ function applyFallbacks(cmdSpec: CommandSpec, state: ParseState): void {
           ? envValue.split(def.valueDelimiter)
           : coerceValue(envValue, def, `env:${def.env}`);
         explicitlySet.add(key);
+        state.valueSources.set(key, 'env');
         continue;
       }
     }
@@ -837,6 +887,7 @@ function applyFallbacks(cmdSpec: CommandSpec, state: ParseState): void {
       const [otherKey, otherValue, conditionalDefault] = def.defaultValueIf;
       if (String(result[otherKey]) === String(otherValue)) {
         result[key] = conditionalDefault;
+        state.valueSources.set(key, 'default');
         continue;
       }
     }
@@ -846,6 +897,7 @@ function applyFallbacks(cmdSpec: CommandSpec, state: ParseState): void {
       for (const [otherKey, otherValue, conditionalDefault] of def.defaultValueIfs) {
         if (String(result[otherKey]) === String(otherValue)) {
           result[key] = conditionalDefault;
+          state.valueSources.set(key, 'default');
           matched = true;
           break;
         }
@@ -856,7 +908,10 @@ function applyFallbacks(cmdSpec: CommandSpec, state: ParseState): void {
     }
 
     if (def.default !== undefined) {
-      result[key] = Array.isArray(def.default) ? [...def.default] : (def.default as string | number | boolean);
+      result[key] = Array.isArray(def.default)
+        ? [...def.default]
+        : (def.default as string | number | boolean);
+      state.valueSources.set(key, 'default');
     }
   }
 }
@@ -876,6 +931,7 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
   const state: ParseState = {
     result: {},
     explicitlySet: new Set<string>(),
+    valueSources: new Map<string, ValueSource>(),
     order: cmdSpec.hasOverrides ? new Map<string, number>() : undefined,
     seq: 0,
     unknown: [],
@@ -971,6 +1027,7 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
     versionIsShort: state.versionIsShort,
     unknown: state.unknown,
     explicitlySet: state.explicitlySet,
+    valueSources: state.valueSources,
   };
 }
 

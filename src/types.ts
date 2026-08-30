@@ -8,8 +8,27 @@
 /** Argument value type - matches clap's value_parser types. */
 export type ArgType = 'boolean' | 'string' | 'number' | 'enum' | 'positional';
 
-/** How an argument collects values. */
-export type ArgAction = 'set' | 'append' | 'count';
+/**
+ * How an argument collects values.
+ * - set: replace (default)
+ * - append: collect into an array
+ * - count: number of occurrences
+ * - setTrue / setFalse: force a boolean regardless of the flag's polarity
+ * - help / helpShort / helpLong / version: trigger the built-in output
+ */
+export type ArgAction =
+  | 'set'
+  | 'append'
+  | 'count'
+  | 'setTrue'
+  | 'setFalse'
+  | 'help'
+  | 'helpShort'
+  | 'helpLong'
+  | 'version';
+
+/** Where a parsed value came from. Mirrors clap's ValueSource. */
+export type ValueSource = 'cli' | 'env' | 'default';
 
 /** Min/max constraint for number of values an argument accepts. */
 export interface NumArgs {
@@ -34,18 +53,22 @@ export interface PossibleValue {
 
 /** Hint for shell completion behavior -- guides what kind of values to complete. */
 export type ValueHint =
+  | 'unknown'
+  | 'other'
   | 'filePath'
   | 'dirPath'
   | 'anyPath'
   | 'executablePath'
   | 'commandName'
+  | 'commandString'
+  | 'commandWithArguments'
   | 'hostname'
   | 'username'
   | 'url'
   | 'emailAddress';
 
 /** Supported shells for completion script generation. */
-export type Shell = 'bash' | 'zsh' | 'fish' | 'powershell';
+export type Shell = 'bash' | 'zsh' | 'fish' | 'powershell' | 'elvish' | 'nushell';
 
 /** Full argument definition - matches clap::Arg. */
 export interface ArgDef {
@@ -71,6 +94,8 @@ export interface ArgDef {
   readonly default?: string | number | boolean | readonly string[];
   /** Value to use when the flag is present but no value given (e.g., --port vs --port=8080). */
   readonly defaultMissingValue?: string | number | boolean;
+  /** Values to use for a multi-value arg present without values. */
+  readonly defaultMissingValues?: readonly string[];
   /**
    * Conditional default: [otherArgName, otherArgValue, defaultValue].
    * If the other arg equals the given value, this default is applied.
@@ -132,6 +157,12 @@ export interface ArgDef {
   readonly requires?: readonly string[];
   /** Names of args this one overrides. The argument given later wins. */
   readonly overridesWith?: readonly string[];
+  /** Requires the named arg only when this one equals a value: [value, argName]. */
+  readonly requiresIf?: readonly [string, string];
+  /** Several conditional requirements, each [thisValue, requiredArgName]. */
+  readonly requiresIfs?: readonly (readonly [string, string])[];
+  /** Argument group name this arg belongs to. */
+  readonly group?: string;
   /** Argument group names this arg belongs to. */
   readonly groups?: readonly string[];
   /** How values are collected: set (replace), append (collect into array), count. */
@@ -353,6 +384,11 @@ export interface CommandContext<T extends ArgsDef = ArgsDef> {
   readonly cmd: CommandDef<T>;
   /** Name of the resolved subcommand, if any. */
   readonly subCommand?: string;
+  /**
+   * Where each argument's value came from, by arg key. Absent means the arg has
+   * no value at all.
+   */
+  readonly valueSources: ReadonlyMap<string, ValueSource>;
   /** Arbitrary user data (for passing state between setup/run/cleanup). */
   data: Record<string, unknown>;
 }
@@ -421,4 +457,6 @@ export interface ParseResult {
   readonly unknown: readonly string[];
   /** Set of arg keys that were explicitly provided (not defaults or env). */
   readonly explicitlySet: ReadonlySet<string>;
+  /** Where each parsed value came from, by arg key. */
+  readonly valueSources: ReadonlyMap<string, ValueSource>;
 }
