@@ -906,6 +906,141 @@ writeFileSync('docs/cli.md', renderMarkdownHelp(main, {
 Produces one heading per command with its usage line and Commands, Arguments and
 Options lists, nesting subcommands as deeper headings.
 
+### Optional Modules
+
+Everything past the core parser lives behind its own entry point, so a running
+CLI never loads a generator it does not call. `import 'clap-ts'` is 3.0ms on
+Node; each module below is another 0.5ms to 1ms, and only when imported.
+
+| Import | Provides |
+|--------|----------|
+| `clap-ts` | `defineCommand`, `runMain`, parsing, validation, help |
+| `clap-ts/config` | Config file discovery, layered under argv and env |
+| `clap-ts/testing` | `runCli`, `captureArgs`, no spawning or global patching |
+| `clap-ts/completions` | bash, zsh, fish, powershell, elvish, nushell |
+| `clap-ts/man` | roff man pages |
+| `clap-ts/markdown` | Markdown documentation |
+| `clap-ts/install` | Write completions and man pages where the system finds them |
+| `clap-ts/spec` | The command tree as plain JSON |
+| `clap-ts/plugins` | Subcommands discovered from installed packages |
+| `clap-ts/argfile` | `@file` response files and stdin |
+| `clap-ts/output` | Tables, key-value blocks, trees |
+| `clap-ts/log` | Levelled logger wired to `-v` and `--quiet` |
+| `clap-ts/progress` | Spinners and progress bars |
+
+### Deprecating Arguments and Commands
+
+```ts
+const main = defineCommand({
+  meta: { name: 'my-tool' },
+  args: {
+    output: { type: 'string', description: 'Where to write' },
+    out: { type: 'string', deprecated: 'renamed', replacedBy: 'output' },
+  },
+  run({ args }) {
+    console.log(args.output);
+  },
+});
+```
+
+Using `--out` warns once on stderr, labels itself `[deprecated: renamed]` in
+help, and forwards its value to `--output`, so a rename keeps working without
+the handler knowing. `deprecated` works the same on `meta` for a whole command.
+
+### Response Files and stdin
+
+```ts
+import { expandArgFiles, readPathOrStdin } from 'clap-ts/argfile';
+
+await runMain(main, { argv: expandArgFiles() });
+```
+
+`@args.txt` is replaced by that file's contents, following the convention git,
+gcc and java use: one argument per line, `#` comments and blank lines skipped,
+quoted runs kept whole, `@@` for a literal at-sign, and nothing after `--`
+touched. `readPathOrStdin` covers the other half, where `-` means stdin.
+
+### Plugins
+
+```ts
+import { pluginSubCommands } from 'clap-ts/plugins';
+
+const main = defineCommand({
+  meta: { name: 'my-tool' },
+  lazySubCommands: pluginSubCommands('my-tool'),
+});
+```
+
+Installing `my-tool-plugin-deploy` makes `my-tool deploy` work. Because it is a
+`lazySubCommands` thunk, neither the directory scan nor the module import
+happens until a token could be a subcommand.
+
+### Installing Completions and Man Pages
+
+```ts
+import { withInstallers } from 'clap-ts/install';
+
+runMain(withInstallers(main));
+// my-tool completions install zsh
+// my-tool man install --dryRun
+```
+
+Writes to the XDG per-user locations, names the file the way each shell expects,
+and reports the profile line to add where sourcing is not automatic.
+
+### Machine-Readable Spec
+
+```ts
+import { toSpecJson } from 'clap-ts/spec';
+
+writeFileSync('cli.json', toSpecJson(main));
+```
+
+The whole tree as plain JSON, for a docs site, editor integration, or generating
+tool definitions from a CLI.
+
+### Terminal Output
+
+```ts
+import { table, keyValue, tree } from 'clap-ts/output';
+
+ctx.stdout.write(table(rows, {
+  columns: [{ key: 'name' }, { key: 'size', align: 'right' }],
+  rule: true,
+}));
+```
+
+Columns size to their widest cell, then the widest shrinks until the table fits
+the terminal. Padding measures visible width, so styled cells line up with plain
+ones.
+
+### Logging and Progress
+
+```ts
+import { loggerFrom } from 'clap-ts/log';
+import { spinner } from 'clap-ts/progress';
+
+const main = defineCommand({
+  meta: { name: 'my-tool' },
+  args: {
+    verbose: { type: 'boolean', short: 'v', action: 'count', description: 'More output' },
+    quiet: { type: 'boolean', short: 'q', description: 'Errors only' },
+  },
+  async run(ctx) {
+    const log = loggerFrom(ctx);   // -v climbs a level, --quiet drops to errors
+    log.debug('shown with -v');
+
+    const spin = spinner('Fetching').start();
+    await fetchThings();
+    spin.succeed('Fetched 12 items');
+  },
+});
+```
+
+Both write to stderr, leaving stdout for real output. Spinners and bars draw
+only when stderr is a terminal and `CI` is unset, so a piped run never fills a
+log with redraw escapes, and still reports its final message once.
+
 ## Value Precedence
 
 Arguments are resolved in this order (highest wins):
