@@ -8,7 +8,7 @@
  */
 
 import type { CommandDef, Shell, ValueHint } from './types.js';
-import { possibleValues } from './parser.js';
+import { possibleValues, subCommandsOf } from './parser.js';
 
 // ---- Internal: Command Tree Traversal ----
 
@@ -96,8 +96,8 @@ function buildCompletionTree(command: CommandDef, name?: string): CompletionNode
   const subcommands: SubcommandInfo[] = [];
   const childNodes = new Map<string, CompletionNode>();
 
-  if (command.subCommands) {
-    for (const [subName, subDef] of Object.entries(command.subCommands)) {
+  {
+    for (const [subName, subDef] of Object.entries(subCommandsOf(command))) {
       subcommands.push({
         name: subName,
         description: subDef.meta.description ?? '',
@@ -857,6 +857,7 @@ export function withCompletions(rootCommand: CommandDef<any>): CommandDef<any> {
       ...rootCommand.subCommands,
       completions: completionsCmd,
     },
+    lazySubCommands: rootCommand.lazySubCommands,
   };
 }
 

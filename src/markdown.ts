@@ -7,7 +7,7 @@
  */
 
 import type { ArgDef, CommandDef, MarkdownOptions } from './types.js';
-import { possibleValues } from './parser.js';
+import { hasSubCommands, possibleValues, subCommandsOf } from './parser.js';
 
 /** Escape the markdown that could break a list item or table cell. */
 function esc(text: string): string {
@@ -39,7 +39,7 @@ function usageLine(path: readonly string[], command: CommandDef): string {
     const name = `<${def.valueName ?? key.toUpperCase()}>`;
     parts.push(def.required ? name : `[${name}]`);
   }
-  if (command.subCommands && Object.keys(command.subCommands).length > 0) {
+  if (hasSubCommands(command)) {
     parts.push(`[${command.meta.subcommandValueName ?? 'COMMAND'}]`);
   }
 
@@ -111,7 +111,7 @@ function renderCommand(
   lines.push(`**Usage:** \`${usageLine(path, command)}\``);
   lines.push('');
 
-  const subs = Object.entries(command.subCommands ?? {}).filter(([, def]) => !def.meta.hidden);
+  const subs = Object.entries(subCommandsOf(command)).filter(([, def]) => !def.meta.hidden);
   if (subs.length > 0) {
     lines.push(`${heading}# Commands`);
     lines.push('');

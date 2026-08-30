@@ -65,6 +65,41 @@ function readEnv(name: string): string | undefined {
     : (globalThis.Bun as { env: Record<string, string | undefined> }).env[name];
 }
 
+// ---- Subcommands ----
+
+const resolvedSubCommands = new WeakMap<object, Record<string, CommandDef<any>>>();
+
+/**
+ * The command's subcommands, building any lazy ones on first use and caching
+ * the result so the thunk runs at most once per command.
+ */
+export function subCommandsOf(command: CommandDef<any>): Record<string, CommandDef<any>> {
+  if (command.lazySubCommands === undefined) {
+    return command.subCommands ?? {};
+  }
+  let resolved = resolvedSubCommands.get(command);
+  if (resolved === undefined) {
+    resolved = { ...command.lazySubCommands(), ...command.subCommands };
+    resolvedSubCommands.set(command, resolved);
+  }
+  return resolved;
+}
+
+/** Whether the command has any subcommand, without building the lazy ones. */
+export function hasSubCommands(command: CommandDef<any>): boolean {
+  if (command.lazySubCommands !== undefined) {
+    return true;
+  }
+  const subs = command.subCommands;
+  if (subs === undefined) {
+    return false;
+  }
+  for (const _key in subs) {
+    return true;
+  }
+  return false;
+}
+
 // ---- Possible Values ----
 
 const possibleValueCache = new WeakMap<object, readonly PossibleValue[]>();
@@ -145,12 +180,18 @@ interface CommandSpec {
   readonly indexedPositionals: number;
   /** Every declared arg, in declaration order, for the fallback and key passes. */
   readonly all: readonly ArgSpec[];
-  /** Subcommand name or alias -> canonical name. Undefined when there are none. */
-  readonly subcommands: Map<string, string> | undefined;
+  /**
+   * The command itself, so the subcommand maps can be built on demand. A CLI
+   * that only ever sees flags never pays for a lazySubCommands thunk.
+   */
+  readonly command: CommandDef<any>;
+  readonly anySubcommands: boolean;
+  /** Subcommand name or alias -> canonical name. Built on first lookup. */
+  subcommands?: Map<string, string>;
+  /** Long or short flag -> canonical subcommand name, for `pacman -S` style. */
+  subcommandFlags?: Map<string, string>;
   readonly inferSubcommands: boolean;
   readonly allowExternal: boolean;
-  /** Long or short flag -> canonical subcommand name, for `pacman -S` style. */
-  readonly subcommandFlags: Map<string, string> | undefined;
   readonly subcommandPrecedence: boolean;
   readonly allowMissingPositional: boolean;
   readonly argsOverrideSelf: boolean;
@@ -323,51 +364,16 @@ function buildSpec(command: CommandDef): CommandSpec {
     positionals.sort((a, b) => (a.def.index ?? Number.MAX_SAFE_INTEGER) - (b.def.index ?? Number.MAX_SAFE_INTEGER));
   }
 
-  let subcommands: Map<string, string> | undefined;
-  let subcommandFlags: Map<string, string> | undefined;
-  if (command.subCommands) {
-    subcommands = new Map();
-    for (const name of Object.keys(command.subCommands)) {
-      subcommands.set(name, name);
-      const subMeta = command.subCommands[name]!.meta;
-      for (const alias of subMeta.aliases ?? []) {
-        subcommands.set(alias, name);
-      }
-      for (const alias of subMeta.hiddenAliases ?? []) {
-        subcommands.set(alias, name);
-      }
-      const shortForms = [
-        ...(subMeta.shortFlag === undefined ? [] : [subMeta.shortFlag]),
-        ...(subMeta.shortFlagAliases ?? []),
-        ...(subMeta.visibleShortFlagAliases ?? []),
-      ];
-      const longForms = [
-        ...(subMeta.longFlag === undefined ? [] : [subMeta.longFlag]),
-        ...(subMeta.longFlagAliases ?? []),
-        ...(subMeta.visibleLongFlagAliases ?? []),
-      ];
-      if (shortForms.length > 0 || longForms.length > 0) {
-        subcommandFlags ??= new Map();
-        for (const form of shortForms) {
-          subcommandFlags.set(`-${form}`, name);
-        }
-        for (const form of longForms) {
-          subcommandFlags.set(`--${form}`, name);
-        }
-      }
-    }
-  }
-
   return {
     longs,
     shorts,
     positionals,
     indexedPositionals: positionals.reduce((n, spec) => (spec.def.last ? n : n + 1), 0),
     all,
-    subcommands,
+    command,
+    anySubcommands: hasSubCommands(command),
     inferSubcommands: command.meta.inferSubcommands === true,
     allowExternal: command.meta.allowExternalSubcommands === true,
-    subcommandFlags,
     subcommandPrecedence: command.meta.subcommandPrecedenceOverArg === true,
     allowMissingPositional: command.meta.allowMissingPositional === true,
     argsOverrideSelf,
@@ -642,15 +648,61 @@ function inferLongEntry(cmdSpec: CommandSpec, name: string): LongEntry | undefin
   return match;
 }
 
+/** Build the name and flag lookup maps, once, on the first token that needs them. */
+function buildSubcommandMaps(cmdSpec: CommandSpec): void {
+  const names = new Map<string, string>();
+  const flags = new Map<string, string>();
+
+  const subs = subCommandsOf(cmdSpec.command);
+  for (const name of Object.keys(subs)) {
+    names.set(name, name);
+    const subMeta = subs[name]!.meta;
+    for (const alias of [...(subMeta.aliases ?? []), ...(subMeta.hiddenAliases ?? [])]) {
+      names.set(alias, name);
+    }
+    for (const form of [
+      ...(subMeta.shortFlag === undefined ? [] : [subMeta.shortFlag]),
+      ...(subMeta.shortFlagAliases ?? []),
+      ...(subMeta.visibleShortFlagAliases ?? []),
+    ]) {
+      flags.set(`-${form}`, name);
+    }
+    for (const form of [
+      ...(subMeta.longFlag === undefined ? [] : [subMeta.longFlag]),
+      ...(subMeta.longFlagAliases ?? []),
+      ...(subMeta.visibleLongFlagAliases ?? []),
+    ]) {
+      flags.set(`--${form}`, name);
+    }
+  }
+
+  cmdSpec.subcommands = names;
+  cmdSpec.subcommandFlags = flags;
+}
+
+/** The subcommand named by a flag form like `-S`, or undefined. */
+function subcommandForFlag(cmdSpec: CommandSpec, token: string): string | undefined {
+  if (!cmdSpec.anySubcommands) {
+    return undefined;
+  }
+  if (cmdSpec.subcommandFlags === undefined) {
+    buildSubcommandMaps(cmdSpec);
+  }
+  return cmdSpec.subcommandFlags!.get(token);
+}
+
 /**
  * Resolve a bare token to a canonical subcommand name, by exact match on the
  * name or an alias, then by unique prefix when inferSubcommands is on.
  */
 function resolveSubcommand(cmdSpec: CommandSpec, token: string): string | undefined {
-  const map = cmdSpec.subcommands;
-  if (map === undefined) {
+  if (!cmdSpec.anySubcommands) {
     return undefined;
   }
+  if (cmdSpec.subcommands === undefined) {
+    buildSubcommandMaps(cmdSpec);
+  }
+  const map = cmdSpec.subcommands!;
   const exact = map.get(token);
   if (exact !== undefined) {
     return exact;
@@ -687,6 +739,14 @@ function handleLong(
     entry = inferLongEntry(cmdSpec, name);
   }
   if (entry === undefined) {
+    // Only now is it worth building the subcommand maps: an unrecognised flag
+    // may still be a flag-invoked subcommand like `pacman --sync`.
+    const flagSub = subcommandForFlag(cmdSpec, token);
+    if (flagSub !== undefined) {
+      state.subCommand = flagSub;
+      state.subCommandArgs = argv.slice(i + 1);
+      return i;
+    }
     state.unknown.push(`--${name}`);
     return i;
   }
@@ -738,6 +798,12 @@ function handleShort(
     const spec = cmdSpec.shorts.get(flag);
 
     if (spec === undefined) {
+      const flagSub = subcommandForFlag(cmdSpec, token);
+      if (flagSub !== undefined) {
+        state.subCommand = flagSub;
+        state.subCommandArgs = argv.slice(i + 1);
+        return i;
+      }
       state.unknown.push(`-${flag}`);
       return i;
     }
@@ -791,12 +857,6 @@ function handleToken(
   state: ParseState,
 ): number {
   if (token.length > 1 && token.charCodeAt(0) === HYPHEN) {
-    const flagSub = cmdSpec.subcommandFlags?.get(token);
-    if (flagSub !== undefined) {
-      state.subCommand = flagSub;
-      state.subCommandArgs = rawArgs.slice(i + 1);
-      return i;
-    }
     if (token.charCodeAt(1) === HYPHEN) {
       return handleLong(token, rawArgs, i, cmdSpec, state);
     }

@@ -9,7 +9,7 @@
 
 import { styleText } from 'node:util';
 import type { ArgDef, CommandDef, CommandMeta, StylesDef } from './types.js';
-import { possibleValues } from './parser.js';
+import { hasSubCommands, possibleValues, subCommandsOf } from './parser.js';
 
 // ---- Color Support ----
 
@@ -219,7 +219,7 @@ function appendUsageParts(usageParts: string[], command: CommandDef): void {
   const argsDef = command.args ?? {};
   const hasOptions = Object.values(argsDef).some((d) => d.type !== 'positional' && !d.hidden);
   const positionals = Object.entries(argsDef).filter(([_, d]) => d.type === 'positional');
-  const hasSubcommands = command.subCommands && Object.keys(command.subCommands).length > 0;
+  const hasSubcommands = hasSubCommands(command);
 
   if (hasOptions) {
     usageParts.push('[OPTIONS]');
@@ -357,7 +357,7 @@ function renderHelpTemplate(
   const optionsStr = optLines.join('\n');
 
   const cmdLines: string[] = [];
-  if (command.subCommands && Object.keys(command.subCommands).length > 0) {
+  if (hasSubCommands(command)) {
     renderSubcommandSection(cmdLines, command, styles, termWidth, fullName);
   }
   const commandsStr = cmdLines.join('\n');
@@ -574,7 +574,7 @@ export function renderHelp(
   lines.push(...optLines);
 
   // Subcommands
-  const hasSubcommands = command.subCommands && Object.keys(command.subCommands).length > 0;
+  const hasSubcommands = hasSubCommands(command);
   if (hasSubcommands) {
     renderSubcommandSection(lines, command, styles, termWidth, fullName);
   }
@@ -631,7 +631,7 @@ function renderSubcommandSection(
   const subEntries: HelpEntry[] = [];
   const rendered = new Set<string>();
 
-  const subs = Object.entries(command.subCommands!);
+  const subs = Object.entries(subCommandsOf(command));
   if (subs.some(([, def]) => def.meta.displayOrder !== undefined)) {
     subs.sort(
       (a, b) =>

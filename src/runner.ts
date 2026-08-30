@@ -20,9 +20,11 @@ import {
   CliParseError,
   collectGlobalArgs,
   getRawArgs,
+  hasSubCommands,
   kebabToCamel,
   mergeGlobalArgs,
   parseArgs,
+  subCommandsOf,
 } from './parser.js';
 import { validate } from './validation.js';
 import { showError, showHelp, showVersion } from './help.js';
@@ -119,7 +121,7 @@ function resolveHelpTarget(
   let current = root;
   const parentNames = [...rootParents];
   for (const name of path) {
-    const next = current.subCommands?.[name];
+    const next = subCommandsOf(current)[name];
     if (next === undefined) {
       break;
     }
@@ -299,7 +301,7 @@ function handleUnrecognizedSubcommand(
   shouldExit: boolean,
   styles?: Partial<StylesDef>,
 ): void {
-  const allNames = collectSubcommandNames(command.subCommands!);
+  const allNames = collectSubcommandNames(subCommandsOf(command));
   let msg = `unrecognized subcommand '${unknownName}'`;
 
   const bestMatch = findClosestSubcommand(unknownName, allNames);
@@ -375,7 +377,7 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
       // The built-in `help` subcommand: `app help`, `app help sub sub`.
       if (
         parseResult.subCommand === undefined &&
-        command.subCommands !== undefined &&
+        hasSubCommands(command) &&
         command.meta.disableHelpSubcommand !== true &&
         parseResult.positionals[0] === 'help'
       ) {
@@ -423,7 +425,7 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
         return;
       }
 
-      const next = command.subCommands?.[parseResult.subCommand];
+      const next = subCommandsOf(command)[parseResult.subCommand];
       if (next === undefined) {
         break;
       }
@@ -443,10 +445,22 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
     // command that declared allowExternalSubcommands.
     if (externalSubcommand !== undefined) {
       if (effectiveCommand.run) {
+        const parser = effectiveCommand.externalSubcommandValueParser;
+        const externalArgs =
+          parser === undefined
+            ? parseResult.subCommandArgs
+            : parseResult.subCommandArgs.map((value) => {
+                try {
+                  return String(parser(value));
+                } catch (error) {
+                  const message = error instanceof Error ? error.message : String(error);
+                  throw new CliParseError(`invalid value '${value}': ${message}`);
+                }
+              });
         await runCommand(
           effectiveCommand,
           parseResult.args as ParsedArgs<ArgsDef>,
-          parseResult.subCommandArgs,
+          externalArgs,
           externalSubcommand,
           parseResult.valueSources,
         );
@@ -473,8 +487,7 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
     if (
       showHelpOnEmpty &&
       rawArgs.length === 0 &&
-      rootCommand.subCommands &&
-      Object.keys(rootCommand.subCommands).length > 0
+      hasSubCommands(rootCommand)
     ) {
       handleHelpRequest(rootCommand, [], shouldExit, false, styles);
       return;
@@ -489,8 +502,7 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
     // If we resolved to a parent command that has subcommands but no run handler,
     // and the user didn't pass a valid subcommand, show help or error
     if (
-      command.subCommands &&
-      Object.keys(command.subCommands).length > 0 &&
+      hasSubCommands(command) &&
       !command.run &&
       !parseResult.subCommand
     ) {

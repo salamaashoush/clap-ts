@@ -7,7 +7,7 @@ import { defineCommand, defineArgs, defineArg, runCommand, runMain } from '../ru
 import { parseArgs } from '../parser.js';
 import { validate } from '../validation.js';
 import { renderHelp } from '../help.js';
-import type { ArgsDef, ParsedArgs } from '../types.js';
+import type { ArgsDef, CommandDef, ParsedArgs } from '../types.js';
 
 // ---- defineCommand ----
 
@@ -370,5 +370,93 @@ describe('global arg values reach the running command', () => {
     });
     await runMain(parent, { argv: ['--token', 'abc', 'child'], exit: false });
     expect(ran).toBe(true);
+  });
+});
+
+describe('lazy subcommands', () => {
+  test('the thunk runs only when a subcommand is actually needed', async () => {
+    let built = 0;
+    const root = defineCommand({
+      meta: { name: 'app', version: '1.0' },
+      lazySubCommands: () => {
+        built++;
+        return { serve: defineCommand({ meta: { name: 'serve' }, run() {} }) };
+      },
+      args: { verbose: { type: 'boolean' } },
+      run() {},
+    });
+
+    // A plain flag parse never touches the subcommand tree.
+    await runMain(root, { argv: ['--verbose'], exit: false });
+    expect(built).toBe(0);
+
+    await runMain(root, { argv: ['serve'], exit: false });
+    expect(built).toBe(1);
+  });
+
+  test('the thunk is built at most once per command', () => {
+    let built = 0;
+    const root: CommandDef = {
+      meta: { name: 'app' },
+      lazySubCommands: () => {
+        built++;
+        return { serve: { meta: { name: 'serve' } } };
+      },
+    };
+    expect(parseArgs(['serve'], root).subCommand).toBe('serve');
+    expect(parseArgs(['serve'], root).subCommand).toBe('serve');
+    expect(built).toBe(1);
+  });
+
+  test('eager subCommands win a name collision and both are reachable', () => {
+    const root: CommandDef = {
+      meta: { name: 'app' },
+      subCommands: { serve: { meta: { name: 'serve-eager' } } },
+      lazySubCommands: () => ({
+        serve: { meta: { name: 'serve-lazy' } },
+        build: { meta: { name: 'build' } },
+      }),
+    };
+    expect(parseArgs(['serve'], root).subCommand).toBe('serve');
+    expect(parseArgs(['build'], root).subCommand).toBe('build');
+    expect(renderHelp(root)).toContain('serve');
+    expect(renderHelp(root)).toContain('build');
+  });
+});
+
+describe('externalSubcommandValueParser', () => {
+  test('each external argument goes through the parser', async () => {
+    let received: readonly string[] = [];
+    const root = defineCommand({
+      meta: { name: 'git', allowExternalSubcommands: true },
+      externalSubcommandValueParser: (v) => v.toUpperCase(),
+      run({ rawArgs }) {
+        received = rawArgs;
+      },
+    });
+    await runMain(root, { argv: ['my-plugin', 'a', 'b'], exit: false });
+    expect(received).toEqual(['A', 'B']);
+  });
+
+  test('a throwing parser surfaces as a parse error', async () => {
+    let err = '';
+    const originalWrite = process.stderr.write;
+    process.stderr.write = ((chunk: string) => {
+      err += chunk;
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const root = defineCommand({
+        meta: { name: 'git', allowExternalSubcommands: true },
+        externalSubcommandValueParser: () => {
+          throw new Error('nope');
+        },
+        run() {},
+      });
+      await runMain(root, { argv: ['plugin', 'x'], exit: false });
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+    expect(err).toContain("invalid value 'x': nope");
   });
 });

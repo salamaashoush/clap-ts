@@ -6,7 +6,12 @@
  */
 
 import type { ArgDef, ArgsDef, ArgGroup, CommandDef, ParseResult } from './types.js';
-import { CliParseError, matchesPossibleValue, possibleValues } from './parser.js';
+import {
+  CliParseError,
+  matchesPossibleValue,
+  possibleValues,
+  subCommandsOf,
+} from './parser.js';
 
 // ---- Compiled Validation Spec ----
 
@@ -188,10 +193,7 @@ function collectKnownFlags(argsDef: ArgsDef): string[] {
  */
 function collectKnownSubcommands(command: CommandDef): string[] {
   const names: string[] = [];
-  if (!command.subCommands) {
-    return names;
-  }
-  for (const [name, def] of Object.entries(command.subCommands)) {
+  for (const [name, def] of Object.entries(subCommandsOf(command))) {
     names.push(name);
     if (def.meta.aliases) {
       for (const alias of def.meta.aliases) {

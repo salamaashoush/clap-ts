@@ -431,6 +431,14 @@ export interface CommandDef<T extends ArgsDef = ArgsDef> {
   /** Subcommand definitions (name -> command). */
   // CommandDef needs to accept any args type for subcommands
   readonly subCommands?: Record<string, CommandDef<any>>;
+  /**
+   * Subcommands built on first use rather than at definition time, so a CLI
+   * with many heavy subcommands does not pay for all of them at startup.
+   * Merged with `subCommands`, which wins on a name collision.
+   */
+  readonly lazySubCommands?: () => Record<string, CommandDef<any>>;
+  /** Parse each argument of an external subcommand before handing it on. */
+  readonly externalSubcommandValueParser?: ValueParserFn;
   /** Argument groups for validation and help grouping. */
   readonly groups?: readonly ArgGroup[];
   // Method syntax, not arrow properties: it makes the parameter bivariant, so a

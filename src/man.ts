@@ -7,7 +7,7 @@
  */
 
 import type { ArgDef, CommandDef, ManOptions } from './types.js';
-import { possibleValues } from './parser.js';
+import { hasSubCommands, possibleValues, subCommandsOf } from './parser.js';
 
 // ---- Escaping ----
 
@@ -95,7 +95,7 @@ function renderSynopsis(name: string, command: CommandDef): string {
     parts.push(def.required ? `${name_}${repeat}` : `[${name_}]${repeat}`);
   }
 
-  if (command.subCommands && Object.keys(command.subCommands).length > 0) {
+  if (hasSubCommands(command)) {
     parts.push(`[${italic('subcommands')}]`);
   }
 
@@ -184,7 +184,7 @@ function renderOptions(command: CommandDef, lines: string[]): boolean {
 }
 
 function renderSubcommands(name: string, command: CommandDef, lines: string[]): void {
-  const subs = Object.entries(command.subCommands ?? {}).filter(([, def]) => !def.meta.hidden);
+  const subs = Object.entries(subCommandsOf(command)).filter(([, def]) => !def.meta.hidden);
   if (subs.length === 0) {
     return;
   }
@@ -273,7 +273,7 @@ export function generateManPages(
 
   const walk = (node: CommandDef, name: string): void => {
     pages.set(`${name}.${section}`, renderManPage(node, { ...opts, name }));
-    for (const [subName, sub] of Object.entries(node.subCommands ?? {})) {
+    for (const [subName, sub] of Object.entries(subCommandsOf(node))) {
       if (sub.meta.hidden) {
         continue;
       }
