@@ -67,6 +67,7 @@ import { toSpecJson } from './spec.js';
 import { table, keyValue, tree } from './output.js';
 import { loggerFrom } from './log.js';
 import { spinner, progressBar } from './progress.js';
+import { promptMissing, input, confirm, select, multiselect, password, scriptedIO } from './prompt.js';
 import { writeFileSync } from 'node:fs';
 """
 

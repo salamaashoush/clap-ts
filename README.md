@@ -1,41 +1,14 @@
 # clap-ts
 
-A type-safe CLI argument parser for TypeScript, inspired by Rust's [clap](https://docs.rs/clap/latest/clap/) crate.
+A type-safe CLI argument parser for TypeScript, modelled on Rust's
+[clap](https://docs.rs/clap/latest/clap/).
 
-Full clap-style parsing, validation, help generation, and subcommand support. Zero runtime dependencies, with its own tokenizer rather than `node:util parseArgs`.
-
-## Features
-
-- **Full type inference** -- `defineCommand` infers exact types for parsed args, no casts needed
-- **Clap-compatible argument model** -- boolean, string, number, enum, positional args with short/long flags
-- **Subcommands** -- nested command trees with alias support, prefix inference, and external subcommands
-- **Validation** -- required, exclusive, conflictsWith, requires, requiredUnlessPresent, requiredIfEq, valueParser, numArgs, argument groups
-- **Custom value parsers** -- function-based parsers for custom validation and type conversion
-- **Clap-style help** -- coloured, width-aware help with custom headings, templates, styles, and next-line layout on narrow terminals
-- **Clap-style errors** -- "did you mean?" typo suggestions via Levenshtein distance
-- **Environment variable fallback** -- `env` field on args, with CLI > env > default precedence
-- **Lifecycle hooks** -- setup/run/cleanup pattern for resource management
-- **Actions** -- `set` (default), `append` (collect into array), `count` (e.g. `-vvv` = 3)
-- **Value delimiters** -- `--tags=a,b,c` splits into array with `valueDelimiter`
-- **Boolean negation** -- `--no-verbose` automatically supported for boolean flags
-- **Global args** -- `global: true` args inherited by all subcommands
-- **Reusable arg groups** -- `defineArgs()` + spread for sharing args across commands
-- **Trailing var args** -- last positional consumes all remaining args
-- **Negative numbers** -- `--offset -10` with `allowNegativeNumbers`, positionals included
-- **Hyphen values** -- `--grep -pattern` with `allowHyphenValues`
-- **Multi-value options** -- `numArgs: { min: 3, max: 3 }` consumes `--point 1 2 3`
-- **Value terminators** -- `--cmds ls -la ; file` with `valueTerminator: ';'`
-- **Overrides** -- `overridesWith` lets the later flag win
-- **Possible values with help** -- `valueParser` entries carrying help text, aliases and `hidden`
-- **Built-in help subcommand** -- `app help serve`, alongside `-h` and `--help`
-- **Flag subcommands** -- `pacman -S` style via `shortFlag` and `longFlag`
-- **Value sources** -- tell a flag that was passed from one that fell back to env or a default
-- **Lazy subcommands** -- `lazySubCommands` defers building a heavy command tree until it is needed
-- **Shell completions** -- bash, zsh, fish, powershell, elvish and nushell
-- **Man pages** -- roff output validated against `groff`
-- **Markdown docs** -- one document for the whole command tree
-- **Zero dependencies** -- only uses `node:util` (styleText, for colour detection)
-- **Bun and Node.js** -- works on both runtimes
+- **Full type inference.** `defineCommand` infers exact argument types; no casts, no schema to repeat.
+- **Complete clap parity.** Every `Arg` and `Command` builder option, from `numArgs` to `overridesWith` to `multicall`.
+- **Fast.** A single pass over argv against a spec compiled once per command: 40ns for a bare parse, 1.5us for a full pipeline.
+- **Zero dependencies.** Only `node:util`, for colour detection.
+- **Batteries behind subpaths.** Config files, prompts, completions for six shells, man pages, markdown docs, plugins, tables, logging and progress, none of which load unless imported.
+- **Node and Bun.** Requires Node 20 or Bun 1.0.
 
 ## Install
 
@@ -108,7 +81,31 @@ Options:
   -V, --version          Print version
 ```
 
-## API Reference
+## Documentation
+
+**Getting started:** [Install](#install) &middot; [Quick Start](#quick-start)
+
+**Defining commands:** [defineCommand](#definecommand) &middot; [Arguments](#arguments) &middot;
+[Constraints](#constraints) &middot; [Positionals](#positionals) &middot;
+[Subcommands](#subcommands) &middot; [Argument Groups](#argument-groups) &middot;
+[Deprecation](#deprecating-arguments-and-commands) &middot; [Lazy Subcommands](#lazy-subcommands)
+
+**Running:** [runMain](#runmain) &middot; [Lifecycle Hooks](#lifecycle-hooks) &middot;
+[Value Precedence](#value-precedence-and-sources) &middot; [Exit Codes](#exit-codes) &middot;
+[Error Messages](#error-messages) &middot; [Low-Level API](#low-level-api)
+
+**Help:** [Help Output](#help-output) &middot; [Styles](#styles) &middot; [Templates](#help-template)
+
+**Optional modules:** [config](#configuration-files) &middot; [prompt](#interactive-prompts) &middot;
+[testing](#testing) &middot; [completions](#shell-completions) &middot; [man](#man-pages) &middot;
+[markdown](#markdown-documentation) &middot; [install](#installing-completions-and-man-pages) &middot;
+[spec](#machine-readable-spec) &middot; [plugins](#plugins) &middot; [argfile](#response-files-and-stdin) &middot;
+[output](#terminal-output) &middot; [log and progress](#logging-and-progress)
+
+**Reference:** [Performance](#performance) &middot; [Comparison with clap](#comparison-with-rust-clap) &middot;
+[Upgrading](#upgrading-from-02)
+
+## Defining Commands
 
 ### defineCommand
 
@@ -199,7 +196,7 @@ const cmd = defineCommand({
 });
 ```
 
-### Argument Definition
+### Arguments
 
 Each argument is defined with an `ArgDef`:
 
@@ -436,7 +433,7 @@ By default a value shown for `env` in help includes the variable's current value
 matching clap. Use `hideEnvValues` to show only the name, or `hideEnv` to drop the
 note entirely, when the variable holds a secret.
 
-### Argument Constraints
+### Constraints
 
 ```ts
 const cmd = defineCommand({
@@ -505,7 +502,7 @@ const cmd = defineCommand({
 });
 ```
 
-### Trailing Var Args and Last Positional
+### Positionals
 
 ```ts
 // trailingVarArg: last positional consumes all remaining args
@@ -591,7 +588,7 @@ const git = defineCommand({
 });
 ```
 
-### Reusable Argument Groups
+### Argument Groups
 
 ```ts
 import { defineArgs, defineCommand } from 'clap-ts';
@@ -620,6 +617,63 @@ const cmd = defineCommand({
 });
 ```
 
+### Deprecating Arguments and Commands
+
+```ts
+const main = defineCommand({
+  meta: { name: 'my-tool' },
+  args: {
+    output: { type: 'string', description: 'Where to write' },
+    out: { type: 'string', deprecated: 'renamed', replacedBy: 'output' },
+  },
+  run({ args }) {
+    console.log(args.output);
+  },
+});
+```
+
+Using `--out` warns once on stderr, labels itself `[deprecated: renamed]` in
+help, and forwards its value to `--output`, so a rename keeps working without
+the handler knowing. `deprecated` works the same on `meta` for a whole command.
+
+### Lazy Subcommands
+
+`lazySubCommands` takes a thunk, so a command tree whose branches each pull in
+heavy modules only builds the branch being run. It is merged with `subCommands`,
+which wins on a name collision.
+
+```ts
+const main = defineCommand({
+  meta: { name: 'tool' },
+  lazySubCommands: () => ({
+    build: require('./commands/build').default,
+    deploy: require('./commands/deploy').default,
+  }),
+});
+```
+
+The thunk runs on the first token that could be a subcommand, so `tool --version`
+never calls it.
+
+## Running
+
+### runMain
+
+Entry point for CLI applications. Handles argv parsing, subcommand resolution, validation, help/version, and error display.
+
+```ts
+import { runMain } from 'clap-ts';
+
+runMain(rootCommand);
+
+runMain(rootCommand, {
+  argv: ['serve', '--port', '8080'],  // override argv (for testing)
+  exit: false,                         // don't call process.exit (for testing)
+  showHelpOnEmpty: true,               // show help when no args (default: true)
+  styles: { /* custom styles */ },     // override terminal colors
+});
+```
+
 ### Lifecycle Hooks
 
 Commands support setup/run/cleanup lifecycle hooks. `cleanup` always runs, even if `run` throws.
@@ -645,7 +699,137 @@ const cmd = defineCommand({
 });
 ```
 
-### Custom Styles
+### Value Precedence and Sources
+
+Arguments are resolved in this order (highest wins):
+
+1. **CLI flags** -- `--port 8080`
+2. **Environment variables** -- `PORT=8080` (when `env: 'PORT'` is set)
+3. **Conditional defaults** -- `defaultValueIf: ['env', 'prod', 443]`
+4. **Static defaults** -- `default: 3000`
+
+Every handler gets a `valueSources` map saying where each argument's value came
+from, which is the only way to tell `--port 3000` from a default of the same
+number.
+
+```ts
+defineCommand({
+  meta: { name: 'serve' },
+  args: {
+    port: { type: 'number', default: 3000, env: 'PORT' },
+  },
+  run({ args, valueSources }) {
+    // 'cli' | 'env' | 'default', or undefined when the arg has no value
+    if (valueSources.get('port') === 'default') {
+      console.log(`Using the default port ${args.port}`);
+    }
+  },
+});
+```
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0    | Success |
+| 1    | Runtime error (unhandled exception in run/setup/cleanup) |
+| 2    | Usage error (parse failure, validation failure, unknown flags) |
+
+### Error Messages
+
+Errors match clap's format with typo suggestions:
+
+```
+error: unexpected argument '--verbos' found
+
+  tip: a similar argument exists: '--verbose'
+
+Usage: my-tool [OPTIONS]
+
+For more information, try '--help'.
+```
+
+```
+error: the argument '--json' cannot be used with '--yaml'
+
+Usage: my-tool [OPTIONS]
+
+For more information, try '--help'.
+```
+
+```
+error: the following required arguments were not provided:
+  --name
+  --port
+
+Usage: my-tool [OPTIONS]
+
+For more information, try '--help'.
+```
+
+### Low-Level API
+
+For advanced use cases, you can use the parser and validator directly:
+
+```ts
+import {
+  parseArgs, validate, renderHelp, CliParseError,
+  subCommandsOf, hasSubCommands, possibleValues,
+} from 'clap-ts';
+
+const command = defineCommand({
+  meta: { name: 'tool' },
+  args: { port: { type: 'number', default: 3000 } },
+});
+
+// Parse without validation
+const result = parseArgs(['--port', '8080'], command);
+// result.args, result.positionals, result.rest, result.unknown
+// result.explicitlySet -- Set of arg keys that were explicitly provided
+
+// Validate separately
+validate(result, command); // throws CliParseError on failure
+
+// Render help text
+const helpText = renderHelp(command);
+
+// Render short help (-h style, hides hideShortHelp args)
+const shortHelp = renderHelp(command, undefined, true);
+```
+
+## Help Output
+
+Help is automatically generated in clap's format, respecting `NO_COLOR`, `TERM=dumb`, and terminal width:
+
+```
+A great CLI tool (my-tool v1.0.0)
+
+Usage: my-tool [OPTIONS] <FILE> [COMMAND]
+
+Arguments:
+  <FILE>    Input file path [required]
+
+Commands:
+  serve (s)    Start the development server
+  build        Build the project
+
+Options:
+  -n, --name <NAME>      User name [required]
+  -e, --env <ENV>        Environment [possible values: dev, staging, prod]
+  -p, --port <PORT>      Port number [default: 3000] [env: PORT]
+      --verbose          Enable verbose output
+  -h, --help             Print help
+  -V, --version          Print version
+
+Network:
+      --host <STRING>    Server host
+      --proxy <STRING>   Proxy URL
+
+Examples:
+  my-tool -n World serve -p 8080
+```
+
+### Styles
 
 Override the default terminal colors for help and error output:
 
@@ -660,6 +844,155 @@ runMain(rootCommand, {
   },
 });
 ```
+
+### Help Template
+
+Use `helpTemplate` for full control over help layout:
+
+```ts
+const cmd = defineCommand({
+  meta: {
+    name: 'tool',
+    version: '1.0.0',
+    helpTemplate: `{before-help}{name} v{version}
+
+{usage}
+
+{all-args}
+{commands}
+{after-help}`,
+  },
+  // ...
+});
+```
+
+Placeholders: `{name}`, `{version}`, `{about}`, `{usage}`, `{all-args}`, `{arguments}`, `{options}`, `{commands}`, `{before-help}`, `{after-help}`
+
+## Optional Modules
+
+Everything past the core parser lives behind its own entry point, so a running
+CLI never loads a generator it does not call. `import 'clap-ts'` is 3.0ms on
+Node; each module below is another 0.5ms to 1ms, and only when imported.
+
+| Import | Provides |
+|--------|----------|
+| `clap-ts` | `defineCommand`, `runMain`, parsing, validation, help |
+| `clap-ts/config` | Config file discovery, layered under argv and env |
+| `clap-ts/prompt` | Ask for required arguments argv left out |
+| `clap-ts/testing` | `runCli`, `captureArgs`, no spawning or global patching |
+| `clap-ts/completions` | bash, zsh, fish, powershell, elvish, nushell |
+| `clap-ts/man` | roff man pages |
+| `clap-ts/markdown` | Markdown documentation |
+| `clap-ts/install` | Write completions and man pages where the system finds them |
+| `clap-ts/spec` | The command tree as plain JSON |
+| `clap-ts/plugins` | Subcommands discovered from installed packages |
+| `clap-ts/argfile` | `@file` response files and stdin |
+| `clap-ts/output` | Tables, key-value blocks, trees |
+| `clap-ts/log` | Levelled logger wired to `-v` and `--quiet` |
+| `clap-ts/progress` | Spinners and progress bars |
+
+### Configuration Files
+
+```ts
+import { runMain } from 'clap-ts';
+import { configOptions } from 'clap-ts/config';
+
+await runMain(main, { ...configOptions('mytool') });
+```
+
+Precedence becomes command line, then environment, then config file, then the
+argument's default, and `ctx.valueSources` reports which layer won. By default
+the search looks for `.mytoolrc`, `.mytoolrc.json`, `mytool.config.json`,
+`.config/mytool.json` and a `mytool` key in `package.json`, walking up from the
+working directory.
+
+A nested object named for a subcommand scopes its contents to that command,
+while scalar keys stay in scope all the way down:
+
+```json
+{
+  "verbose": true,
+  "serve": { "port": 8080 }
+}
+```
+
+Only JSON is read out of the box, which is what keeps the package
+dependency-free. Point `parse` at a TOML or YAML reader for those:
+
+```ts
+import { parse as parseToml } from 'smol-toml';
+
+configOptions('mytool', {
+  files: ['.mytoolrc.toml', 'mytool.toml'],
+  parse: (text) => parseToml(text),
+  stopAtProjectRoot: true,   // stop at the directory holding package.json or .git
+});
+```
+
+`configOptions` returns a thunk rather than the values, so the filesystem is
+only searched when some argument is still on its default. A fully specified
+command line costs nothing: 1.0us against 23us when the search actually runs.
+
+### Interactive Prompts
+
+```ts
+import { promptMissing } from 'clap-ts/prompt';
+
+await runMain(main, { fillMissing: promptMissing() });
+```
+
+A required argument nobody supplied is asked for rather than rejected, and the
+prompt comes from the definition that already exists: a boolean becomes a
+confirm, possible values become a numbered list, an argument marked `secret` is
+read without echoing, and the answer goes through the argument's own
+`valueParser` before being accepted. `ctx.valueSources` reports these as
+`'prompt'`.
+
+Nothing is asked when stdin is not a terminal, so a script or a CI job still
+fails fast with the usual error rather than waiting on input that never comes.
+Pass `force: true` to ask anyway.
+
+The individual prompts are available on their own, and each takes an `io` so a
+test can script the answers without a terminal:
+
+```ts
+import { input, confirm, select, password, scriptedIO } from 'clap-ts/prompt';
+
+const name = await input('Release name');
+const mode = await select('Mode', ['fast', 'safe']);
+const sure = await confirm('Deploy to production', { defaultValue: false });
+const token = await password('API token');
+
+// In a test
+await select('Mode', ['fast', 'safe'], { io: scriptedIO(['2']) });   // 'safe'
+```
+
+### Testing
+
+```ts
+import { runCli, captureArgs } from 'clap-ts/testing';
+
+const result = await runCli(main, ['serve', '--port', '8080']);
+expect(result.exitCode).toBe(0);
+expect(result.plainStdout).toContain('listening');
+```
+
+`runCli` returns `stdout`, `stderr`, `plainStdout`, `plainStderr`, `exitCode` and
+`error`. No process is spawned and no global is patched: output goes to
+collectors through `RunOptions.stdout`/`stderr` and the exit code arrives via
+`onExit`. An error thrown by a handler comes back on `error` rather than being
+rethrown, so one assertion style covers success and failure.
+
+`captureArgs` reports the parsed arguments without running the handler body,
+which works for a subcommand as well as the root:
+
+```ts
+const { args } = await captureArgs(main, ['serve', '--port', '9']);
+expect(args.port).toBe(9);
+```
+
+Handlers that write through `ctx.stdout` rather than `process.stdout` are
+captured too.
 
 ### Shell Completions
 
@@ -717,162 +1050,6 @@ const bashScript = generateCompletions(root, 'bash');
 const zshScript = generateCompletions(root, 'zsh', 'custom-binary-name');
 ```
 
-### runMain
-
-Entry point for CLI applications. Handles argv parsing, subcommand resolution, validation, help/version, and error display.
-
-```ts
-import { runMain } from 'clap-ts';
-
-runMain(rootCommand);
-
-runMain(rootCommand, {
-  argv: ['serve', '--port', '8080'],  // override argv (for testing)
-  exit: false,                         // don't call process.exit (for testing)
-  showHelpOnEmpty: true,               // show help when no args (default: true)
-  styles: { /* custom styles */ },     // override terminal colors
-});
-```
-
-### Low-Level API
-
-For advanced use cases, you can use the parser and validator directly:
-
-```ts
-import {
-  parseArgs, validate, renderHelp, CliParseError,
-  subCommandsOf, hasSubCommands, possibleValues,
-} from 'clap-ts';
-
-const command = defineCommand({
-  meta: { name: 'tool' },
-  args: { port: { type: 'number', default: 3000 } },
-});
-
-// Parse without validation
-const result = parseArgs(['--port', '8080'], command);
-// result.args, result.positionals, result.rest, result.unknown
-// result.explicitlySet -- Set of arg keys that were explicitly provided
-
-// Validate separately
-validate(result, command); // throws CliParseError on failure
-
-// Render help text
-const helpText = renderHelp(command);
-
-// Render short help (-h style, hides hideShortHelp args)
-const shortHelp = renderHelp(command, undefined, true);
-```
-
-### Value Sources
-
-Every handler gets a `valueSources` map saying where each argument's value came
-from, which is the only way to tell `--port 3000` from a default of the same
-number.
-
-```ts
-defineCommand({
-  meta: { name: 'serve' },
-  args: {
-    port: { type: 'number', default: 3000, env: 'PORT' },
-  },
-  run({ args, valueSources }) {
-    // 'cli' | 'env' | 'default', or undefined when the arg has no value
-    if (valueSources.get('port') === 'default') {
-      console.log(`Using the default port ${args.port}`);
-    }
-  },
-});
-```
-
-### Testing
-
-```ts
-import { runCli, captureArgs } from 'clap-ts/testing';
-
-const result = await runCli(main, ['serve', '--port', '8080']);
-expect(result.exitCode).toBe(0);
-expect(result.plainStdout).toContain('listening');
-```
-
-`runCli` returns `stdout`, `stderr`, `plainStdout`, `plainStderr`, `exitCode` and
-`error`. No process is spawned and no global is patched: output goes to
-collectors through `RunOptions.stdout`/`stderr` and the exit code arrives via
-`onExit`. An error thrown by a handler comes back on `error` rather than being
-rethrown, so one assertion style covers success and failure.
-
-`captureArgs` reports the parsed arguments without running the handler body,
-which works for a subcommand as well as the root:
-
-```ts
-const { args } = await captureArgs(main, ['serve', '--port', '9']);
-expect(args.port).toBe(9);
-```
-
-Handlers that write through `ctx.stdout` rather than `process.stdout` are
-captured too.
-
-### Configuration Files
-
-```ts
-import { runMain } from 'clap-ts';
-import { configOptions } from 'clap-ts/config';
-
-await runMain(main, { ...configOptions('mytool') });
-```
-
-Precedence becomes command line, then environment, then config file, then the
-argument's default, and `ctx.valueSources` reports which layer won. By default
-the search looks for `.mytoolrc`, `.mytoolrc.json`, `mytool.config.json`,
-`.config/mytool.json` and a `mytool` key in `package.json`, walking up from the
-working directory.
-
-A nested object named for a subcommand scopes its contents to that command,
-while scalar keys stay in scope all the way down:
-
-```json
-{
-  "verbose": true,
-  "serve": { "port": 8080 }
-}
-```
-
-Only JSON is read out of the box, which is what keeps the package
-dependency-free. Point `parse` at a TOML or YAML reader for those:
-
-```ts
-import { parse as parseToml } from 'smol-toml';
-
-configOptions('mytool', {
-  files: ['.mytoolrc.toml', 'mytool.toml'],
-  parse: (text) => parseToml(text),
-  stopAtProjectRoot: true,   // stop at the directory holding package.json or .git
-});
-```
-
-`configOptions` returns a thunk rather than the values, so the filesystem is
-only searched when some argument is still on its default. A fully specified
-command line costs nothing: 1.0us against 23us when the search actually runs.
-
-### Lazy Subcommands
-
-`lazySubCommands` takes a thunk, so a command tree whose branches each pull in
-heavy modules only builds the branch being run. It is merged with `subCommands`,
-which wins on a name collision.
-
-```ts
-const main = defineCommand({
-  meta: { name: 'tool' },
-  lazySubCommands: () => ({
-    build: require('./commands/build').default,
-    deploy: require('./commands/deploy').default,
-  }),
-});
-```
-
-The thunk runs on the first token that could be a subcommand, so `tool --version`
-never calls it.
-
 ### Man Pages
 
 ```ts
@@ -906,75 +1083,6 @@ writeFileSync('docs/cli.md', renderMarkdownHelp(main, {
 Produces one heading per command with its usage line and Commands, Arguments and
 Options lists, nesting subcommands as deeper headings.
 
-### Optional Modules
-
-Everything past the core parser lives behind its own entry point, so a running
-CLI never loads a generator it does not call. `import 'clap-ts'` is 3.0ms on
-Node; each module below is another 0.5ms to 1ms, and only when imported.
-
-| Import | Provides |
-|--------|----------|
-| `clap-ts` | `defineCommand`, `runMain`, parsing, validation, help |
-| `clap-ts/config` | Config file discovery, layered under argv and env |
-| `clap-ts/testing` | `runCli`, `captureArgs`, no spawning or global patching |
-| `clap-ts/completions` | bash, zsh, fish, powershell, elvish, nushell |
-| `clap-ts/man` | roff man pages |
-| `clap-ts/markdown` | Markdown documentation |
-| `clap-ts/install` | Write completions and man pages where the system finds them |
-| `clap-ts/spec` | The command tree as plain JSON |
-| `clap-ts/plugins` | Subcommands discovered from installed packages |
-| `clap-ts/argfile` | `@file` response files and stdin |
-| `clap-ts/output` | Tables, key-value blocks, trees |
-| `clap-ts/log` | Levelled logger wired to `-v` and `--quiet` |
-| `clap-ts/progress` | Spinners and progress bars |
-
-### Deprecating Arguments and Commands
-
-```ts
-const main = defineCommand({
-  meta: { name: 'my-tool' },
-  args: {
-    output: { type: 'string', description: 'Where to write' },
-    out: { type: 'string', deprecated: 'renamed', replacedBy: 'output' },
-  },
-  run({ args }) {
-    console.log(args.output);
-  },
-});
-```
-
-Using `--out` warns once on stderr, labels itself `[deprecated: renamed]` in
-help, and forwards its value to `--output`, so a rename keeps working without
-the handler knowing. `deprecated` works the same on `meta` for a whole command.
-
-### Response Files and stdin
-
-```ts
-import { expandArgFiles, readPathOrStdin } from 'clap-ts/argfile';
-
-await runMain(main, { argv: expandArgFiles() });
-```
-
-`@args.txt` is replaced by that file's contents, following the convention git,
-gcc and java use: one argument per line, `#` comments and blank lines skipped,
-quoted runs kept whole, `@@` for a literal at-sign, and nothing after `--`
-touched. `readPathOrStdin` covers the other half, where `-` means stdin.
-
-### Plugins
-
-```ts
-import { pluginSubCommands } from 'clap-ts/plugins';
-
-const main = defineCommand({
-  meta: { name: 'my-tool' },
-  lazySubCommands: pluginSubCommands('my-tool'),
-});
-```
-
-Installing `my-tool-plugin-deploy` makes `my-tool deploy` work. Because it is a
-`lazySubCommands` thunk, neither the directory scan nor the module import
-happens until a token could be a subcommand.
-
 ### Installing Completions and Man Pages
 
 ```ts
@@ -998,6 +1106,34 @@ writeFileSync('cli.json', toSpecJson(main));
 
 The whole tree as plain JSON, for a docs site, editor integration, or generating
 tool definitions from a CLI.
+
+### Plugins
+
+```ts
+import { pluginSubCommands } from 'clap-ts/plugins';
+
+const main = defineCommand({
+  meta: { name: 'my-tool' },
+  lazySubCommands: pluginSubCommands('my-tool'),
+});
+```
+
+Installing `my-tool-plugin-deploy` makes `my-tool deploy` work. Because it is a
+`lazySubCommands` thunk, neither the directory scan nor the module import
+happens until a token could be a subcommand.
+
+### Response Files and stdin
+
+```ts
+import { expandArgFiles, readPathOrStdin } from 'clap-ts/argfile';
+
+await runMain(main, { argv: expandArgFiles() });
+```
+
+`@args.txt` is replaced by that file's contents, following the convention git,
+gcc and java use: one argument per line, `#` comments and blank lines skipped,
+quoted runs kept whole, `@@` for a literal at-sign, and nothing after `--`
+touched. `readPathOrStdin` covers the other half, where `-` means stdin.
 
 ### Terminal Output
 
@@ -1040,110 +1176,6 @@ const main = defineCommand({
 Both write to stderr, leaving stdout for real output. Spinners and bars draw
 only when stderr is a terminal and `CI` is unset, so a piped run never fills a
 log with redraw escapes, and still reports its final message once.
-
-## Value Precedence
-
-Arguments are resolved in this order (highest wins):
-
-1. **CLI flags** -- `--port 8080`
-2. **Environment variables** -- `PORT=8080` (when `env: 'PORT'` is set)
-3. **Conditional defaults** -- `defaultValueIf: ['env', 'prod', 443]`
-4. **Static defaults** -- `default: 3000`
-
-## Error Messages
-
-Errors match clap's format with typo suggestions:
-
-```
-error: unexpected argument '--verbos' found
-
-  tip: a similar argument exists: '--verbose'
-
-Usage: my-tool [OPTIONS]
-
-For more information, try '--help'.
-```
-
-```
-error: the argument '--json' cannot be used with '--yaml'
-
-Usage: my-tool [OPTIONS]
-
-For more information, try '--help'.
-```
-
-```
-error: the following required arguments were not provided:
-  --name
-  --port
-
-Usage: my-tool [OPTIONS]
-
-For more information, try '--help'.
-```
-
-## Help Output
-
-Help is automatically generated in clap's format, respecting `NO_COLOR`, `TERM=dumb`, and terminal width:
-
-```
-A great CLI tool (my-tool v1.0.0)
-
-Usage: my-tool [OPTIONS] <FILE> [COMMAND]
-
-Arguments:
-  <FILE>    Input file path [required]
-
-Commands:
-  serve (s)    Start the development server
-  build        Build the project
-
-Options:
-  -n, --name <NAME>      User name [required]
-  -e, --env <ENV>        Environment [possible values: dev, staging, prod]
-  -p, --port <PORT>      Port number [default: 3000] [env: PORT]
-      --verbose          Enable verbose output
-  -h, --help             Print help
-  -V, --version          Print version
-
-Network:
-      --host <STRING>    Server host
-      --proxy <STRING>   Proxy URL
-
-Examples:
-  my-tool -n World serve -p 8080
-```
-
-### Help Template
-
-Use `helpTemplate` for full control over help layout:
-
-```ts
-const cmd = defineCommand({
-  meta: {
-    name: 'tool',
-    version: '1.0.0',
-    helpTemplate: `{before-help}{name} v{version}
-
-{usage}
-
-{all-args}
-{commands}
-{after-help}`,
-  },
-  // ...
-});
-```
-
-Placeholders: `{name}`, `{version}`, `{about}`, `{usage}`, `{all-args}`, `{arguments}`, `{options}`, `{commands}`, `{before-help}`, `{after-help}`
-
-## Exit Codes
-
-| Code | Meaning |
-|------|---------|
-| 0    | Success |
-| 1    | Runtime error (unhandled exception in run/setup/cleanup) |
-| 2    | Usage error (parse failure, validation failure, unknown flags) |
 
 ## Performance
 
@@ -1269,6 +1301,12 @@ bun run bench
 | Lazy subcommand building (`defer`) | Yes | Yes |
 | externalSubcommandValueParser | Yes | Yes |
 | Markdown documentation | clap-markdown | Yes |
+| Config file layering | no | Yes (`clap-ts/config`) |
+| Interactive prompts for missing args | no | Yes (`clap-ts/prompt`) |
+| Test harness with no spawning | no | Yes (`clap-ts/testing`) |
+| Response files (`@file`) | no | Yes (`clap-ts/argfile`) |
+| Plugin subcommands from packages | no | Yes (`clap-ts/plugins`) |
+| Tables, logging, progress | no | Yes (`clap-ts/output`, `/log`, `/progress`) |
 | Derive macro | Yes | n/a in TypeScript |
 | dontCollapseArgsInUsage | deprecated no-op | Not implemented |
 
@@ -1276,14 +1314,6 @@ Two clap settings are deliberately absent. `dont_collapse_args_in_usage` is a
 deprecated no-op upstream, and this usage line never collapsed positionals in the
 first place. The derive macro has no analogue: `defineCommand` already infers the
 parsed argument types from the definition object.
-
-## Roadmap
-
-Feature parity with clap is complete as far as the builder API goes. What is left
-is polish:
-
-- A `docs` subcommand helper, the way `withCompletions` wraps completion output
-- Coloured `--help` output in the markdown and man renderers' examples
 
 ## Upgrading from 0.2
 
@@ -1312,6 +1342,17 @@ in line with clap. Each of these was previously wrong or silently permissive:
 - `ParseResult` gained `valueSources`, `errors`, `subCommandArgs`,
   `subCommandIsExternal` and `versionIsShort`. Only the low-level API sees these;
   `defineCommand` and `runMain` are unaffected.
+
+## Roadmap
+
+Parity with clap's builder API is complete, and the optional modules cover the
+ergonomics around it. What is left is polish:
+
+- A `docs` subcommand helper, the way `withInstallers` wraps the generators
+- Arrow-key selection in `clap-ts/prompt` where the terminal supports it, keeping
+  the numbered list as the fallback
+- Shell-side dynamic completion, so a value list can come from the running CLI
+  rather than only from the definition
 
 ## Requirements
 
