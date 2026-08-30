@@ -33,6 +33,14 @@
     "./argfile": {
       "types": "./dist/argfile.d.ts",
       "import": "./dist/argfile.js"
+    },
+    "./spec": {
+      "types": "./dist/spec.d.ts",
+      "import": "./dist/spec.js"
+    },
+    "./install": {
+      "types": "./dist/install.d.ts",
+      "import": "./dist/install.js"
     }
   },
   "files": [
