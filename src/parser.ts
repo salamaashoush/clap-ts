@@ -17,7 +17,7 @@
  * possible values) live in validation.ts.
  */
 
-import type { ArgDef, ArgsDef, ParseResult, CommandDef } from './types.js';
+import type { ArgDef, ArgsDef, ParseResult, CommandDef, PossibleValue } from './types.js';
 
 // ---- Error ----
 
@@ -53,6 +53,44 @@ function readEnv(name: string): string | undefined {
   return globalThis.Bun === undefined
     ? process.env[name]
     : (globalThis.Bun as { env: Record<string, string | undefined> }).env[name];
+}
+
+// ---- Possible Values ----
+
+const possibleValueCache = new WeakMap<object, readonly PossibleValue[]>();
+
+/**
+ * Normalize an arg's allowed values to PossibleValue records. Plain strings and
+ * PossibleValue objects can be mixed in the same list.
+ */
+export function possibleValues(def: ArgDef): readonly PossibleValue[] {
+  const parser = def.valueParser;
+  if (parser === undefined || typeof parser === 'function') {
+    return [];
+  }
+  const cached = possibleValueCache.get(parser);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const normalized = parser.map((v) => (typeof v === 'string' ? { name: v } : v));
+  possibleValueCache.set(parser, normalized);
+  return normalized;
+}
+
+/** Whether a raw value matches this possible value, by name or alias. */
+export function matchesPossibleValue(
+  candidate: PossibleValue,
+  value: string,
+  ignoreCase: boolean,
+): boolean {
+  if (ignoreCase) {
+    const lowered = value.toLowerCase();
+    if (candidate.name.toLowerCase() === lowered) {
+      return true;
+    }
+    return candidate.aliases?.some((a) => a.toLowerCase() === lowered) ?? false;
+  }
+  return candidate.name === value || (candidate.aliases?.includes(value) ?? false);
 }
 
 // ---- Compiled Spec ----
@@ -199,6 +237,12 @@ function buildSpec(command: CommandDef): CommandSpec {
     shorts.set('V', versionSpec);
   }
 
+  // An explicit index overrides declaration order; unindexed positionals keep
+  // their relative order after the indexed ones are placed.
+  if (positionals.some((spec) => spec.def.index !== undefined)) {
+    positionals.sort((a, b) => (a.def.index ?? Number.MAX_SAFE_INTEGER) - (b.def.index ?? Number.MAX_SAFE_INTEGER));
+  }
+
   let subcommands: Map<string, string> | undefined;
   if (command.subCommands) {
     subcommands = new Map();
@@ -287,6 +331,9 @@ function displayName(spec: ArgSpec): string {
 interface ParseState {
   readonly result: Record<string, string | number | boolean | string[]>;
   readonly explicitlySet: Set<string>;
+  /** Arg key -> sequence number of its last explicit occurrence, for overridesWith. */
+  readonly order: Map<string, number>;
+  seq: number;
   readonly unknown: string[];
   readonly positionals: string[];
   readonly rest: string[];
@@ -296,6 +343,12 @@ interface ParseState {
   subCommand?: string;
   subCommandIsExternal: boolean;
   subCommandArgs: readonly string[];
+}
+
+/** Record that an arg was explicitly given, keeping the occurrence order. */
+function markSet(state: ParseState, key: string): void {
+  state.explicitlySet.add(key);
+  state.order.set(key, state.seq++);
 }
 
 /** Whether a token can serve as a value for this arg rather than starting a new flag. */
@@ -333,7 +386,7 @@ function applyFlagOnly(spec: ArgSpec, negated: boolean, state: ParseState): void
   } else {
     state.result[spec.key] = !negated;
   }
-  state.explicitlySet.add(spec.key);
+  markSet(state, spec.key);
 }
 
 /** Store one or more parsed values for an arg, honouring the append action. */
@@ -353,7 +406,7 @@ function applyValues(spec: ArgSpec, values: string[], state: ParseState): void {
     state.result[spec.key] = coerceValue(values[0]!, spec.def, name);
   }
 
-  state.explicitlySet.add(spec.key);
+  markSet(state, spec.key);
 }
 
 /** Apply defaultMissingValue for a flag whose value was omitted (numArgs.min === 0). */
@@ -367,7 +420,7 @@ function applyMissingValue(spec: ArgSpec, state: ParseState): void {
   } else {
     state.result[spec.key] = fallback;
   }
-  state.explicitlySet.add(spec.key);
+  markSet(state, spec.key);
 }
 
 /**
@@ -495,7 +548,7 @@ function handleLong(
     if (spec.isBool && negated) {
       // `--no-verbose=true` means "negate", so invert whatever was supplied.
       state.result[spec.key] = coerceValue(inline, spec.def, `--${name}`) === false;
-      state.explicitlySet.add(spec.key);
+      markSet(state, spec.key);
       return i;
     }
     applyValues(spec, [inline], state);
@@ -577,7 +630,7 @@ function assignPositionals(cmdSpec: CommandSpec, state: ParseState): void {
       // `last` positionals are only fed from tokens after `--`.
       if (state.rest.length > 0) {
         state.result[spec.key] = state.rest[0]!;
-        state.explicitlySet.add(spec.key);
+        markSet(state, spec.key);
       }
       continue;
     }
@@ -585,7 +638,7 @@ function assignPositionals(cmdSpec: CommandSpec, state: ParseState): void {
     if (spec.def.trailingVarArg) {
       if (index < state.positionals.length) {
         state.result[spec.key] = state.positionals.slice(index);
-        state.explicitlySet.add(spec.key);
+        markSet(state, spec.key);
         index = state.positionals.length;
       }
       return;
@@ -599,14 +652,45 @@ function assignPositionals(cmdSpec: CommandSpec, state: ParseState): void {
       const take = Math.min(spec.max, state.positionals.length - index);
       const values = state.positionals.slice(index, index + take);
       state.result[spec.key] = values.map((v) => String(coerceValue(v, spec.def, spec.key)));
-      state.explicitlySet.add(spec.key);
+      markSet(state, spec.key);
       index += take;
       continue;
     }
 
     state.result[spec.key] = coerceValue(state.positionals[index]!, spec.def, spec.key);
-    state.explicitlySet.add(spec.key);
+    markSet(state, spec.key);
     index++;
+  }
+}
+
+// ---- Overrides ----
+
+/**
+ * Drop args displaced by a later `overridesWith`. Only command-line
+ * occurrences take part, so an env or default value is never overridden.
+ */
+function applyOverrides(cmdSpec: CommandSpec, state: ParseState): void {
+  for (const spec of cmdSpec.all) {
+    const targets = spec.def.overridesWith;
+    if (targets === undefined || !state.explicitlySet.has(spec.key)) {
+      continue;
+    }
+    const mine = state.order.get(spec.key);
+    if (mine === undefined) {
+      continue;
+    }
+    for (const target of targets) {
+      if (target === spec.key) {
+        continue;
+      }
+      const theirs = state.order.get(target);
+      if (theirs === undefined || theirs > mine) {
+        continue;
+      }
+      delete state.result[target];
+      state.explicitlySet.delete(target);
+      state.order.delete(target);
+    }
   }
 }
 
@@ -657,6 +741,20 @@ function applyFallbacks(cmdSpec: CommandSpec, state: ParseState): void {
       }
     }
 
+    if (def.defaultValueIfs) {
+      let matched = false;
+      for (const [otherKey, otherValue, conditionalDefault] of def.defaultValueIfs) {
+        if (String(result[otherKey]) === String(otherValue)) {
+          result[key] = conditionalDefault;
+          matched = true;
+          break;
+        }
+      }
+      if (matched) {
+        continue;
+      }
+    }
+
     if (def.default !== undefined) {
       result[key] = Array.isArray(def.default) ? [...def.default] : (def.default as string | number | boolean);
     }
@@ -678,6 +776,8 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
   const state: ParseState = {
     result: {},
     explicitlySet: new Set<string>(),
+    order: new Map<string, number>(),
+    seq: 0,
     unknown: [],
     positionals: [],
     rest: [],
@@ -735,6 +835,7 @@ export function parseArgs(rawArgs: readonly string[], command: CommandDef): Pars
   }
 
   assignPositionals(cmdSpec, state);
+  applyOverrides(cmdSpec, state);
   applyFallbacks(cmdSpec, state);
 
   // Expose both the declared key and its camelCase form.

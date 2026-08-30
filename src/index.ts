@@ -10,6 +10,7 @@ export type {
   ArgAction,
   NumArgs,
   ValueParserFn,
+  PossibleValue,
   ValueHint,
   Shell,
   ArgDef,

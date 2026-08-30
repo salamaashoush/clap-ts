@@ -20,6 +20,18 @@ export interface NumArgs {
 /** Custom value parser function. Receives raw string, returns parsed value or throws. */
 export type ValueParserFn = (value: string) => unknown;
 
+/** One allowed value for an argument, with optional help text and aliases. */
+export interface PossibleValue {
+  /** The canonical value as it appears in help and completions. */
+  readonly name: string;
+  /** Description shown next to the value in long help. */
+  readonly help?: string;
+  /** Additional accepted spellings, not shown in help. */
+  readonly aliases?: readonly string[];
+  /** Accept the value but keep it out of help and completions. */
+  readonly hidden?: boolean;
+}
+
 /** Hint for shell completion behavior -- guides what kind of values to complete. */
 export type ValueHint =
   | 'filePath'
@@ -41,6 +53,12 @@ export interface ArgDef {
   readonly type: ArgType;
   /** Human-readable description shown in help. */
   readonly description?: string;
+  /** Extended description shown with --help but not with -h. */
+  readonly longDescription?: string;
+  /** Sort key within the arg's help section; lower values come first. */
+  readonly displayOrder?: number;
+  /** Render the description on its own line beneath the flag. */
+  readonly nextLineHelp?: boolean;
   /** Short flag character (e.g., 'v' for -v). */
   readonly short?: string;
   /** Long flag name (e.g., 'verbose' for --verbose). Defaults to the arg key. */
@@ -58,6 +76,12 @@ export interface ArgDef {
    * If the other arg equals the given value, this default is applied.
    */
   readonly defaultValueIf?: readonly [string, string, string | number | boolean];
+  /** Several conditional defaults; the first whose condition holds is applied. */
+  readonly defaultValueIfs?: readonly (readonly [
+    string,
+    string,
+    string | number | boolean,
+  ])[];
   /** Whether this argument is required. */
   readonly required?: boolean;
   /**
@@ -70,6 +94,12 @@ export interface ArgDef {
    * Makes this arg required when the condition is met.
    */
   readonly requiredIfEq?: readonly [string, string];
+  /** Required when ANY of these [argName, argValue] conditions holds. */
+  readonly requiredIfEqAny?: readonly (readonly [string, string])[];
+  /** Required when ALL of these [argName, argValue] conditions hold. */
+  readonly requiredIfEqAll?: readonly (readonly [string, string])[];
+  /** Required unless ALL of the named args are present. */
+  readonly requiredUnlessPresentAll?: readonly string[];
   /** Cannot be used with ANY other argument. */
   readonly exclusive?: boolean;
   /** Global arg -- inherited by all subcommands. */
@@ -78,12 +108,16 @@ export interface ArgDef {
   readonly env?: string;
   /** Display name for the value in help (e.g., "PATH", "PORT"). */
   readonly valueName?: string;
+  /** Per-value display names for a multi-value arg (e.g., ['X', 'Y', 'Z']). */
+  readonly valueNames?: readonly string[];
   /**
    * Value validation/parsing. Either:
-   * - A string array of allowed values (enum-like restriction), or
+   * - An array of allowed values, each a plain string or a PossibleValue, or
    * - A function that parses/validates the raw string value (throw to reject).
    */
-  readonly valueParser?: readonly string[] | ValueParserFn;
+  readonly valueParser?: readonly (string | PossibleValue)[] | ValueParserFn;
+  /** Match allowed values case-insensitively. The input is kept as typed. */
+  readonly ignoreCase?: boolean;
   /** Character to split values on (e.g., ',' for --tags=a,b,c). */
   readonly valueDelimiter?: string;
   /** Require `--flag=value` form; reject `--flag value`. */
@@ -96,6 +130,10 @@ export interface ArgDef {
   readonly conflictsWith?: readonly string[];
   /** Names of args that must also be present when this one is used. */
   readonly requires?: readonly string[];
+  /** Names of args this one overrides. The argument given later wins. */
+  readonly overridesWith?: readonly string[];
+  /** Argument group names this arg belongs to. */
+  readonly groups?: readonly string[];
   /** How values are collected: set (replace), append (collect into array), count. */
   readonly action?: ArgAction;
   /** Hide this argument from all help output. */
@@ -104,8 +142,14 @@ export interface ArgDef {
   readonly hideShortHelp?: boolean;
   /** Hide this argument from long help (--help) only. */
   readonly hideLongHelp?: boolean;
-  /** Hide possible values list from help (when valueParser is string[]). */
+  /** Hide possible values list from help (when valueParser is an array). */
   readonly hidePossibleValues?: boolean;
+  /** Hide the [default: ...] note from help. */
+  readonly hideDefaultValue?: boolean;
+  /** Hide the [env: ...] note from help. */
+  readonly hideEnv?: boolean;
+  /** Show [env: VAR] in help without the variable's current value. */
+  readonly hideEnvValues?: boolean;
   /** Description for the --no-X variant of boolean flags. */
   readonly negativeDescription?: string;
   /** Accept values that start with a hyphen (e.g., --grep -pattern). */
@@ -116,6 +160,8 @@ export interface ArgDef {
   readonly trailingVarArg?: boolean;
   /** Positional that requires -- before it (like clap's last()). */
   readonly last?: boolean;
+  /** Explicit 1-based position for a positional arg. */
+  readonly index?: number;
   /** Custom section heading in help output (groups args under this heading). */
   readonly helpHeading?: string;
   /** Hint for shell completion -- guides what kind of values to suggest (files, dirs, hosts, etc.). */
@@ -204,6 +250,10 @@ export interface ArgGroup {
   readonly required?: boolean;
   /** Whether args in the group are mutually exclusive. */
   readonly multiple?: boolean;
+  /** Args that cannot be used when any member of this group is present. */
+  readonly conflictsWith?: readonly string[];
+  /** Args that must be present when any member of this group is present. */
+  readonly requires?: readonly string[];
 }
 
 /**

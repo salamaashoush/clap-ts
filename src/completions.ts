@@ -7,7 +7,8 @@
  * 2. Dynamic: completeEnv() checks env vars, outputs completions, returns true if handled
  */
 
-import type { ArgDef, CommandDef, Shell, ValueHint } from './types.js';
+import type { CommandDef, Shell, ValueHint } from './types.js';
+import { possibleValues } from './parser.js';
 
 // ---- Internal: Command Tree Traversal ----
 
@@ -52,7 +53,9 @@ function buildCompletionTree(command: CommandDef, name?: string): CompletionNode
       long: longName,
       description: def.description ?? '',
       takesValue: def.type !== 'boolean' && def.action !== 'count',
-      possibleValues: Array.isArray(def.valueParser) ? def.valueParser : [],
+      possibleValues: possibleValues(def)
+        .filter((v) => !v.hidden)
+        .map((v) => v.name),
       valueHint: def.valueHint,
       hidden: def.hidden ?? false,
     });
@@ -535,7 +538,6 @@ function generatePowerShellNode(
   // Complete flags and subcommands at this level
   const completions: string[] = [];
   for (const f of visibleFlags) {
-    const desc = escDq(f.description);
     completions.push(`${indent}[System.Management.Automation.CompletionResult]::new('--${f.long}', '--${f.long}', 'ParameterName', '${escDq(f.description)}')`);
     if (f.short) {
       completions.push(`${indent}[System.Management.Automation.CompletionResult]::new('-${f.short}', '-${f.short}', 'ParameterName', '${escDq(f.description)}')`);

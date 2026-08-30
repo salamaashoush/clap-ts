@@ -9,6 +9,7 @@
 
 import { styleText } from 'node:util';
 import type { ArgDef, CommandDef, CommandMeta, StylesDef } from './types.js';
+import { possibleValues } from './parser.js';
 
 // ---- Color Support ----
 
@@ -104,14 +105,14 @@ function formatArgFlag(key: string, def: ArgDef, styles: StylesDef): { flag: str
   }
 
   // Value placeholder
-  if (def.type !== 'boolean' || def.valueName) {
-    const valueName = def.valueName ?? def.type.toUpperCase();
-    if (def.numArgs && def.numArgs.min === 0) {
-      parts.push(` ${styles.value(`[${valueName}]`)}`);
-      rawParts.push(` [${valueName}]`);
-    } else {
-      parts.push(` ${styles.value(`<${valueName}>`)}`);
-      rawParts.push(` <${valueName}>`);
+  if (def.type !== 'boolean' || def.valueName || def.valueNames) {
+    const optional = def.numArgs !== undefined && def.numArgs.min === 0;
+    const open = optional ? '[' : '<';
+    const close = optional ? ']' : '>';
+    const names = def.valueNames ?? [def.valueName ?? def.type.toUpperCase()];
+    for (const name of names) {
+      parts.push(` ${styles.value(`${open}${name}${close}`)}`);
+      rawParts.push(` ${open}${name}${close}`);
     }
   }
 
@@ -125,17 +126,21 @@ function formatArgFlag(key: string, def: ArgDef, styles: StylesDef): { flag: str
 function formatArgSuffix(def: ArgDef): string {
   const suffixes: string[] = [];
 
-  if (def.default !== undefined && def.type !== 'boolean') {
+  if (def.default !== undefined && def.type !== 'boolean' && !def.hideDefaultValue) {
     const defaultStr = Array.isArray(def.default) ? def.default.join(', ') : String(def.default);
     suffixes.push(`[default: ${defaultStr}]`);
   }
 
-  if (def.env) {
-    suffixes.push(`[env: ${def.env}]`);
+  if (def.env && !def.hideEnv) {
+    const current = def.hideEnvValues ? undefined : process.env[def.env];
+    suffixes.push(current ? `[env: ${def.env}=${current}]` : `[env: ${def.env}]`);
   }
 
-  if (def.valueParser && Array.isArray(def.valueParser) && def.valueParser.length > 0 && !def.hidePossibleValues) {
-    suffixes.push(`[possible values: ${def.valueParser.join(', ')}]`);
+  if (!def.hidePossibleValues) {
+    const visible = possibleValues(def).filter((v) => !v.hidden);
+    if (visible.length > 0) {
+      suffixes.push(`[possible values: ${visible.map((v) => v.name).join(', ')}]`);
+    }
   }
 
   if (def.required) {
@@ -143,6 +148,24 @@ function formatArgSuffix(def: ArgDef): string {
   }
 
   return suffixes.length > 0 ? ` ${suffixes.join(' ')}` : '';
+}
+
+/** Description for an arg, preferring the long form in long help. */
+function argDescription(def: ArgDef, isShortHelp: boolean): string {
+  const base = (!isShortHelp && def.longDescription) || def.description || '';
+  return base + formatArgSuffix(def);
+}
+
+/** Sort help entries by displayOrder, keeping declaration order as the tiebreak. */
+function byDisplayOrder(entries: (readonly [string, ArgDef])[]): (readonly [string, ArgDef])[] {
+  if (!entries.some(([, def]) => def.displayOrder !== undefined)) {
+    return entries;
+  }
+  return [...entries].sort(
+    (a, b) =>
+      (a[1].displayOrder ?? Number.MAX_SAFE_INTEGER) -
+      (b[1].displayOrder ?? Number.MAX_SAFE_INTEGER),
+  );
 }
 
 /** Append usage parts for options, positionals, and subcommands. */
@@ -188,6 +211,10 @@ interface HelpEntry {
   label: string;
   rawLen: number;
   desc: string;
+  /** Put the description on its own line beneath the label. */
+  nextLine?: boolean;
+  /** Extra indented lines rendered after the description. */
+  detail?: readonly string[];
 }
 
 /** Render aligned entries (flag + description with padding). */
@@ -199,14 +226,48 @@ function renderAlignedEntries(
   if (entries.length === 0) {
     return;
   }
-  const maxLen = Math.max(...entries.map((e) => e.rawLen));
+  const inline = entries.filter((e) => !e.nextLine);
+  const maxLen = inline.length > 0 ? Math.max(...inline.map((e) => e.rawLen)) : 0;
   const descIndent = maxLen + 4;
 
   for (const entry of entries) {
-    const padding = ' '.repeat(Math.max(2, descIndent - entry.rawLen));
-    const wrappedDesc = wrapText(entry.desc, termWidth, descIndent + 2);
-    lines.push(`${entry.label}${padding}${wrappedDesc}`);
+    if (entry.nextLine) {
+      lines.push(entry.label);
+      if (entry.desc) {
+        lines.push(`      ${wrapText(entry.desc, termWidth, 8)}`);
+      }
+    } else {
+      const padding = ' '.repeat(Math.max(2, descIndent - entry.rawLen));
+      lines.push(`${entry.label}${padding}${wrapText(entry.desc, termWidth, descIndent + 2)}`);
+    }
+    if (entry.detail) {
+      for (const line of entry.detail) {
+        lines.push(line);
+      }
+    }
   }
+}
+
+/**
+ * Per-value help block, as clap renders under an option in long help:
+ *
+ *   Possible values:
+ *   - fast: skip the slow checks
+ */
+function possibleValueDetail(def: ArgDef, styles: StylesDef, isShortHelp: boolean): string[] | undefined {
+  if (isShortHelp || def.hidePossibleValues) {
+    return undefined;
+  }
+  const visible = possibleValues(def).filter((v) => !v.hidden);
+  if (!visible.some((v) => v.help)) {
+    return undefined;
+  }
+  const detail = ['', `      ${styles.heading('Possible values:')}`];
+  for (const value of visible) {
+    detail.push(`      - ${styles.value(value.name)}${value.help ? `: ${value.help}` : ''}`);
+  }
+  detail.push('');
+  return detail;
 }
 
 // ---- Template Rendering ----
@@ -279,12 +340,17 @@ function renderPositionalSection(
   lines.push(styles.heading('Arguments:'));
 
   const entries: HelpEntry[] = [];
-  for (const [key, def] of visiblePositionals) {
+  for (const [key, def] of byDisplayOrder(visiblePositionals)) {
     const name = def.valueName ?? key.toUpperCase();
     const label = `  ${styles.value(`<${name}>`)}`;
     const rawLen = name.length + 4;
-    const desc = (def.description ?? '') + formatArgSuffix(def);
-    entries.push({ label, rawLen, desc });
+    entries.push({
+      label,
+      rawLen,
+      desc: argDescription(def, isShortHelp),
+      nextLine: def.nextLineHelp,
+      detail: possibleValueDetail(def, styles, isShortHelp),
+    });
   }
 
   renderAlignedEntries(entries, termWidth, lines);
@@ -327,10 +393,15 @@ function renderOptionsSection(
 
     const entries: HelpEntry[] = [];
 
-    for (const [key, def] of groupOptions) {
+    for (const [key, def] of byDisplayOrder(groupOptions)) {
       const { flag, rawLen } = formatArgFlag(key, def, styles);
-      const desc = (def.description ?? '') + formatArgSuffix(def);
-      entries.push({ label: `  ${flag}`, rawLen: rawLen + 2, desc });
+      entries.push({
+        label: `  ${flag}`,
+        rawLen: rawLen + 2,
+        desc: argDescription(def, isShortHelp),
+        nextLine: def.nextLineHelp,
+        detail: possibleValueDetail(def, styles, isShortHelp),
+      });
 
       // Boolean negation: --no-flag
       if (def.type === 'boolean' && def.negativeDescription) {

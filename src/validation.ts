@@ -5,8 +5,8 @@
  * Includes typo suggestion via Levenshtein distance.
  */
 
-import type { ArgDef, ArgsDef, CommandDef, ParseResult } from './types.js';
-import { CliParseError } from './parser.js';
+import type { ArgDef, ArgsDef, ArgGroup, CommandDef, ParseResult } from './types.js';
+import { CliParseError, matchesPossibleValue, possibleValues } from './parser.js';
 
 // ---- Compiled Validation Spec ----
 
@@ -49,7 +49,7 @@ function buildValidationSpec(command: CommandDef): ValidationSpec {
     if (def.required && def.default === undefined) {
       required.push(entry);
     }
-    if (def.requiredIfEq) {
+    if (def.requiredIfEq || def.requiredIfEqAny || def.requiredIfEqAll) {
       requiredIfEq.push(entry);
     }
     if (def.valueParser) {
@@ -283,7 +283,7 @@ function validateRequired(
   const missing: string[] = [];
 
   for (const [key, def] of spec.required) {
-    // requiredUnlessPresent: skip if the named arg(s) are present
+    // requiredUnlessPresent: skip if any of the named args is present
     if (def.requiredUnlessPresent) {
       const unlessArgs = Array.isArray(def.requiredUnlessPresent)
         ? def.requiredUnlessPresent
@@ -291,6 +291,15 @@ function validateRequired(
       if (unlessArgs.some((name) => isArgSet(args[name], argsDef[name]?.type))) {
         continue;
       }
+    }
+
+    // requiredUnlessPresentAll: skip only when every named arg is present
+    if (
+      def.requiredUnlessPresentAll &&
+      def.requiredUnlessPresentAll.length > 0 &&
+      def.requiredUnlessPresentAll.every((name) => isArgSet(args[name], argsDef[name]?.type))
+    ) {
+      continue;
     }
 
     const value = args[key];
@@ -312,19 +321,30 @@ function validateRequiredIfEq(
   spec: ValidationSpec,
   args: Record<string, string | number | boolean | string[]>,
 ): void {
-  for (const [key, def] of spec.requiredIfEq) {
-    const [otherKey, otherValue] = def.requiredIfEq!;
-    const otherArgValue = args[otherKey];
+  const holds = (
+    args: Record<string, string | number | boolean | string[]>,
+    [otherKey, otherValue]: readonly [string, string],
+  ): boolean => {
+    const actual = args[otherKey];
+    return actual !== undefined && String(actual) === otherValue;
+  };
 
-    // Check if the other arg's value matches the condition
-    if (otherArgValue !== undefined && String(otherArgValue) === otherValue) {
-      if (!isArgSet(args[key], def.type)) {
-        const displayName =
-          def.type === 'positional' ? `<${def.valueName ?? key}>` : `--${def.long ?? key}`;
-        throw new CliParseError(
-          `the following required arguments were not provided:\n  ${displayName}`,
-        );
-      }
+  for (const [key, def] of spec.requiredIfEq) {
+    let isRequired = def.requiredIfEq !== undefined && holds(args, def.requiredIfEq);
+
+    if (!isRequired && def.requiredIfEqAny) {
+      isRequired = def.requiredIfEqAny.some((condition) => holds(args, condition));
+    }
+    if (!isRequired && def.requiredIfEqAll && def.requiredIfEqAll.length > 0) {
+      isRequired = def.requiredIfEqAll.every((condition) => holds(args, condition));
+    }
+
+    if (isRequired && !isArgSet(args[key], def.type)) {
+      const displayName =
+        def.type === 'positional' ? `<${def.valueName ?? key}>` : `--${def.long ?? key}`;
+      throw new CliParseError(
+        `the following required arguments were not provided:\n  ${displayName}`,
+      );
     }
   }
 }
@@ -348,16 +368,20 @@ function validateValueParser(
     }
 
     // Enum-style value parser: validate against allowed values
-    const possible = def.valueParser as readonly string[];
+    const possible = possibleValues(def);
     if (possible.length === 0) {
       continue;
     }
 
+    const ignoreCase = def.ignoreCase === true;
     const valueName = def.valueName ?? longName.toUpperCase();
     const values = Array.isArray(value) ? value : [String(value)];
     for (const v of values) {
-      if (!possible.includes(v)) {
-        const possibleStr = possible.join(', ');
+      if (!possible.some((candidate) => matchesPossibleValue(candidate, v, ignoreCase))) {
+        const possibleStr = possible
+          .filter((candidate) => !candidate.hidden)
+          .map((candidate) => candidate.name)
+          .join(', ');
         throw new CliParseError(
           `invalid value '${v}' for '--${longName} <${valueName}>'\n  [possible values: ${possibleStr}]`,
         );
@@ -452,27 +476,97 @@ function validateNumArgs(
   }
 }
 
+/**
+ * Collect the effective groups: those declared on the command, widened by any
+ * arg that names the group itself via `groups`.
+ */
+function collectGroups(command: CommandDef, argsDef: ArgsDef): readonly ArgGroup[] {
+  const declared = command.groups ?? [];
+  const byName = new Map<string, string[]>();
+
+  for (const key of Object.keys(argsDef)) {
+    const memberships = argsDef[key]!.groups;
+    if (!memberships) {
+      continue;
+    }
+    for (const name of memberships) {
+      const members = byName.get(name);
+      if (members === undefined) {
+        byName.set(name, [key]);
+      } else {
+        members.push(key);
+      }
+    }
+  }
+
+  if (byName.size === 0) {
+    return declared;
+  }
+
+  const merged: ArgGroup[] = [];
+  for (const group of declared) {
+    const extra = byName.get(group.name);
+    if (extra === undefined) {
+      merged.push(group);
+      continue;
+    }
+    byName.delete(group.name);
+    merged.push({ ...group, args: [...group.args, ...extra.filter((a) => !group.args.includes(a))] });
+  }
+  for (const [name, members] of byName) {
+    merged.push({ name, args: members });
+  }
+  return merged;
+}
+
 /** Validate argument groups. */
 function validateGroups(
   command: CommandDef,
   argsDef: ArgsDef,
   args: Record<string, string | number | boolean | string[]>,
 ): void {
-  if (!command.groups) {
+  const groups = collectGroups(command, argsDef);
+  if (groups.length === 0) {
     return;
   }
 
-  for (const group of command.groups) {
+  const flagName = (name: string): string => `'--${argsDef[name]?.long ?? name}'`;
+
+  for (const group of groups) {
     const setArgs = group.args.filter((argName) => isArgSet(args[argName], argsDef[argName]?.type));
 
     if (group.required && setArgs.length === 0) {
-      const argList = group.args.map((a) => `'--${argsDef[a]?.long ?? a}'`).join(', ');
+      const argList = group.args.map(flagName).join(', ');
       throw new CliParseError(`one of the following arguments must be provided: ${argList}`);
     }
 
     if (!group.multiple && setArgs.length > 1) {
-      const argList = setArgs.map((a) => `'--${argsDef[a]?.long ?? a}'`).join(', ');
+      const argList = setArgs.map(flagName).join(', ');
       throw new CliParseError(`the following arguments cannot be used together: ${argList}`);
+    }
+
+    if (setArgs.length === 0) {
+      continue;
+    }
+
+    if (group.conflictsWith) {
+      for (const other of group.conflictsWith) {
+        if (isArgSet(args[other], argsDef[other]?.type)) {
+          throw new CliParseError(
+            `the argument ${flagName(setArgs[0]!)} cannot be used with ${flagName(other)}`,
+          );
+        }
+      }
+    }
+
+    if (group.requires) {
+      const missing = group.requires.filter(
+        (other) => !isArgSet(args[other], argsDef[other]?.type),
+      );
+      if (missing.length > 0) {
+        const lines = missing.map((m) => `  --${argsDef[m]?.long ?? m}`).join('\n');
+        throw new CliParseError(`the following required arguments were not provided:\n${lines}`);
+      }
     }
   }
 }
