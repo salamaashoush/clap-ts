@@ -53,21 +53,23 @@ export function getRawArgs(argv?: readonly string[], noBinaryName = false): stri
   if (argv) {
     return [...argv];
   }
-  // Bun.argv includes [bun, script, ...args], same as process.argv
-  const source =
-    globalThis.Bun === undefined ? process.argv : (globalThis.Bun as { argv: string[] }).argv;
+  // `Bun.argv` is `process.argv`, and bun implements `process` in full, so
+  // reaching for the one when the other is there was a branch with two
+  // spellings of one answer.
+  const source = process.argv;
   return noBinaryName ? [...source] : source.slice(2);
 }
 
 function readEnv(name: string): string | undefined {
-  return globalThis.Bun === undefined
-    ? process.env[name]
-    : (globalThis.Bun as { env: Record<string, string | undefined> }).env[name];
+  return process.env[name];
 }
 
 // ---- Subcommands ----
 
-const resolvedSubCommands = new WeakMap<object, Record<string, CommandDef<any>>>();
+const resolvedSubCommands = new WeakMap<
+  CommandDef<any>,
+  Record<string, CommandDef<any>>
+>();
 
 /**
  * The command's subcommands, building any lazy ones on first use and caching
@@ -102,7 +104,10 @@ export function hasSubCommands(command: CommandDef<any>): boolean {
 
 // ---- Possible Values ----
 
-const possibleValueCache = new WeakMap<object, readonly PossibleValue[]>();
+const possibleValueCache = new WeakMap<
+  readonly (string | PossibleValue)[],
+  readonly PossibleValue[]
+>();
 
 /**
  * Normalize an arg's allowed values to PossibleValue records. Plain strings and
