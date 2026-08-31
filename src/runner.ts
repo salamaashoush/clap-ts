@@ -641,7 +641,7 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
               });
         await runCommand(
           effectiveCommand,
-          parseResult.args as ParsedArgs<ArgsDef>,
+          parseResult.args,
           externalArgs,
           externalSubcommand,
           parseResult.valueSources,
@@ -737,7 +737,7 @@ export async function runMain(rootCommand: CommandDef<any>, opts?: RunOptions): 
     // Run the command
     await runCommand(
       effectiveCommand,
-      finalResult.args as ParsedArgs<ArgsDef>,
+      finalResult.args,
       rawArgs,
       undefined,
       finalResult.valueSources,

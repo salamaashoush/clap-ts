@@ -395,22 +395,35 @@ export interface ArgGroup {
 }
 
 /**
+ * The value one arg parses to, given its action and its type.
+ *
+ * Taken apart from `InferArgValue` so that both unions reach a naked type
+ * parameter and the conditional distributes over them. `A['action']` is an
+ * indexed access, and a conditional on one of those tests the whole union at
+ * once: for a literal arg definition that is the same answer either way, but
+ * for `ArgDef` itself it is the difference between `string` and every value an
+ * arg can actually hold.
+ */
+type ArgValueOf<Act, Ty> = Act extends 'append'
+  ? string[]
+  : Act extends 'count'
+    ? number
+    : Ty extends 'boolean'
+      ? boolean
+      : Ty extends 'number'
+        ? number
+        : string;
+
+/**
  * Infer the parsed type from an ArgDef.
  * - boolean -> boolean
  * - number -> number
  * - string/enum/positional -> string
  * - action: 'append' -> string[]
  * - action: 'count' -> number
+ * - ArgDef itself -> string | number | boolean | string[]
  */
-export type InferArgValue<A extends ArgDef> = A['action'] extends 'append'
-  ? string[]
-  : A['action'] extends 'count'
-    ? number
-    : A['type'] extends 'boolean'
-      ? boolean
-      : A['type'] extends 'number'
-        ? number
-        : string;
+export type InferArgValue<A extends ArgDef> = ArgValueOf<A['action'], A['type']>;
 
 /**
  * Infer whether an arg is optional based on required/default.
